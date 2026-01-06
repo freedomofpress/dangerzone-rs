@@ -9,7 +9,7 @@ This is a simple Rust implementation of Dangerzone that converts potentially dan
 ## Features
 
 - Uses the official Dangerzone Docker images from `ghcr.io/freedomofpress/dangerzone/v1`
-- Supports both podman and docker runtimes
+- Uses podman for container runtime
 - Streams documents through the conversion process
 - Two-phase conversion: document → pixels → safe PDF
 - Parses the binary pixel stream protocol
@@ -18,12 +18,10 @@ This is a simple Rust implementation of Dangerzone that converts potentially dan
 ## Prerequisites
 
 - Rust (for building)
-- Podman or Docker installed and running
+- Podman installed and running
 - The Dangerzone container image pulled:
   ```bash
   podman pull ghcr.io/freedomofpress/dangerzone/v1
-  # or
-  docker pull ghcr.io/freedomofpress/dangerzone/v1
   ```
 
 ## Building
@@ -32,18 +30,13 @@ This is a simple Rust implementation of Dangerzone that converts potentially dan
 cargo build --release
 ```
 
-The binary will be available at `target/release/dangerzone`.
+The binary will be available at `target/release/dangerzone-rs`.
 
 ## Usage
 
-Basic usage with podman (default):
+Basic usage:
 ```bash
-dangerzone --input unsafe.pdf --output safe.pdf
-```
-
-Using docker instead of podman:
-```bash
-dangerzone --input unsafe.pdf --output safe.pdf --use-docker
+dangerzone-rs --input unsafe.pdf --output safe.pdf
 ```
 
 Or using cargo run:
@@ -78,13 +71,13 @@ cargo run -- --input test.pdf --output safe.pdf
 
 ## How it works
 
-1. **Document to Pixels**: The input document is streamed to stdin of a sandboxed container that converts it to pixel data
+1. **Document to Pixels**: The input document is streamed to stdin of a sandboxed podman container that converts it to pixel data
 2. **Parse Pixel Stream**: The binary output stream is parsed according to the Dangerzone protocol:
    - Page count (2 bytes, big-endian)
    - For each page: width (2 bytes), height (2 bytes), RGB pixel data
 3. **Pixels to PDF**: The pixel data is converted to a safe PDF using Rust PDF libraries
 
-Both conversions happen with strict security settings following the Dangerzone security model.
+All conversions happen with strict security settings following the Dangerzone security model.
 
 ## Security Features
 

@@ -19,23 +19,11 @@ struct Args {
     /// Output PDF path
     #[arg(short, long)]
     output: String,
-
-    /// Use docker instead of podman
-    #[arg(long, default_value = "false")]
-    use_docker: bool,
 }
 
 const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
 const INT_BYTES: usize = 2;
 const DPI: f32 = 150.0;
-
-fn get_runtime_name(use_docker: bool) -> &'static str {
-    if use_docker {
-        "docker"
-    } else {
-        "podman"
-    }
-}
 
 fn get_security_args() -> Vec<String> {
     vec![
@@ -122,7 +110,7 @@ fn parse_pixel_data(data: &[u8]) -> Result<Vec<PageData>> {
     Ok(pages)
 }
 
-fn convert_doc_to_pixels(runtime: &str, input_path: &str) -> Result<Vec<u8>> {
+fn convert_doc_to_pixels(input_path: &str) -> Result<Vec<u8>> {
     eprintln!("Converting document to pixels...");
 
     let mut args = vec!["run".to_string()];
@@ -136,7 +124,7 @@ fn convert_doc_to_pixels(runtime: &str, input_path: &str) -> Result<Vec<u8>> {
         "dangerzone.conversion.doc_to_pixels".to_string(),
     ]);
 
-    let mut child = Command::new(runtime)
+    let mut child = Command::new("podman")
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -144,8 +132,8 @@ fn convert_doc_to_pixels(runtime: &str, input_path: &str) -> Result<Vec<u8>> {
         .spawn()
         .with_context(|| {
             format!(
-                "Failed to spawn container. Make sure {} is installed and the image '{}' is pulled.",
-                runtime, IMAGE_NAME
+                "Failed to spawn container. Make sure podman is installed and the image '{}' is pulled.",
+                IMAGE_NAME
             )
         })?;
 
@@ -275,21 +263,14 @@ fn add_page_to_pdf(
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let runtime = get_runtime_name(args.use_docker);
-
     eprintln!("Dangerzone Rust CLI");
-    eprintln!("Using container runtime: {}", runtime);
+    eprintln!("Using container runtime: podman");
     eprintln!("Input: {}", args.input);
     eprintln!("Output: {}", args.output);
     eprintln!();
 
-    // Step 1: Convert document to pixels
-    let pixels_data = convert_doc_to_pixels(runtime, &args.input)?;
-
-    // Step 2: Parse the pixel data
+    let pixels_data = convert_doc_to_pixels(&args.input)?;
     let pages = parse_pixel_data(&pixels_data)?;
-
-    // Step 3: Convert pixels to safe PDF
     convert_pixels_to_pdf(&pages, &args.output)?;
 
     eprintln!();
