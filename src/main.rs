@@ -1,12 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use printpdf::*;
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-
-// Import image types with explicit prefix to avoid ambiguity
-use ::image::{DynamicImage, ImageBuffer, Rgb};
 
 /// A simple Dangerzone CLI implementation in Rust
 #[derive(Parser, Debug)]
@@ -178,61 +174,139 @@ fn convert_pixels_to_pdf(pages: &[PageData], output_path: &str, _enable_ocr: boo
         anyhow::bail!("No pages to convert");
     }
 
-    let first_page = &pages[0];
-    let width_mm = (first_page.width as f32) / DPI * 25.4;
-    let height_mm = (first_page.height as f32) / DPI * 25.4;
-
-    let (doc, mut page_index, mut layer_index) =
-        PdfDocument::new("Sanitized Document", Mm(width_mm), Mm(height_mm), "Layer 1");
-
-    add_page_to_pdf(&doc, &mut page_index, &mut layer_index, &pages[0])?;
-
-    for (i, page) in pages.iter().enumerate().skip(1) {
-        let width_mm = (page.width as f32) / DPI * 25.4;
-        let height_mm = (page.height as f32) / DPI * 25.4;
-
-        eprintln!("Adding page {} to PDF...", i + 1);
-
-        let (new_page_index, new_layer_index) =
-            doc.add_page(Mm(width_mm), Mm(height_mm), "Layer 1");
-        page_index = new_page_index;
-        layer_index = new_layer_index;
-
-        add_page_to_pdf(&doc, &mut page_index, &mut layer_index, page)?;
-    }
-
-    let file = File::create(output_path).context("Failed to create output file")?;
-    let mut writer = BufWriter::new(file);
-    doc.save(&mut writer)
-        .context("Failed to save PDF document")?;
+    let mut file = File::create(output_path).context("Failed to create output file")?;
+    write_pdf(&mut file, pages)?;
 
     eprintln!("Safe PDF created successfully at: {}", output_path);
     Ok(())
 }
 
-fn add_page_to_pdf(
-    doc: &PdfDocumentReference,
-    page_index: &mut PdfPageIndex,
-    layer_index: &mut PdfLayerIndex,
-    page: &PageData,
-) -> Result<()> {
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::from_raw(page.width as u32, page.height as u32, page.pixels.clone())
-            .context("Failed to create image from pixel data")?;
-
-    let dynamic_img = DynamicImage::ImageRgb8(img);
-    let image = Image::from_dynamic_image(&dynamic_img);
-
-    let layer = doc.get_page(*page_index).get_layer(*layer_index);
-
-    image.add_to_layer(
-        layer.clone(),
-        ImageTransform {
-            dpi: Some(DPI),
-            ..Default::default()
-        },
-    );
-
+/// Write a minimal PDF file with embedded RGB pixel data
+fn write_pdf(writer: &mut File, pages: &[PageData]) -> Result<()> {
+    // PDF structure:
+    // 1. Header
+    // 2. Objects (catalog, pages, page objects, image objects)
+    // 3. Cross-reference table (xref)
+    // 4. Trailer
+    
+    let mut pdf_data = Vec::new();
+    let mut object_offsets = Vec::new();
+    
+    // PDF Header
+    pdf_data.extend_from_slice(b"%PDF-1.4\n");
+    pdf_data.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n"); // Binary comment for compatibility
+    
+    // Object 1: Catalog
+    object_offsets.push(pdf_data.len());
+    pdf_data.extend_from_slice(b"1 0 obj\n");
+    pdf_data.extend_from_slice(b"<<\n");
+    pdf_data.extend_from_slice(b"/Type /Catalog\n");
+    pdf_data.extend_from_slice(b"/Pages 2 0 R\n");
+    pdf_data.extend_from_slice(b">>\n");
+    pdf_data.extend_from_slice(b"endobj\n");
+    
+    // Object 2: Pages (parent)
+    object_offsets.push(pdf_data.len());
+    pdf_data.extend_from_slice(b"2 0 obj\n");
+    pdf_data.extend_from_slice(b"<<\n");
+    pdf_data.extend_from_slice(b"/Type /Pages\n");
+    
+    // Build kids array
+    let mut kids = String::from("/Kids [");
+    for i in 0..pages.len() {
+        kids.push_str(&format!("{} 0 R ", 3 + i * 2));
+    }
+    kids.push_str("]\n");
+    pdf_data.extend_from_slice(kids.as_bytes());
+    
+    pdf_data.extend_from_slice(format!("/Count {}\n", pages.len()).as_bytes());
+    pdf_data.extend_from_slice(b">>\n");
+    pdf_data.extend_from_slice(b"endobj\n");
+    
+    // For each page, create a Page object and an Image XObject
+    for (page_idx, page) in pages.iter().enumerate() {
+        eprintln!("Adding page {} to PDF...", page_idx + 1);
+        
+        // Convert pixels to points (1 point = 1/72 inch)
+        let width_pts = (page.width as f32) / DPI * 72.0;
+        let height_pts = (page.height as f32) / DPI * 72.0;
+        
+        // Page object
+        let page_obj_num = 3 + page_idx * 2;
+        let image_obj_num = page_obj_num + 1;
+        
+        object_offsets.push(pdf_data.len());
+        pdf_data.extend_from_slice(format!("{} 0 obj\n", page_obj_num).as_bytes());
+        pdf_data.extend_from_slice(b"<<\n");
+        pdf_data.extend_from_slice(b"/Type /Page\n");
+        pdf_data.extend_from_slice(b"/Parent 2 0 R\n");
+        pdf_data.extend_from_slice(format!("/MediaBox [0 0 {:.2} {:.2}]\n", width_pts, height_pts).as_bytes());
+        pdf_data.extend_from_slice(b"/Resources <<\n");
+        pdf_data.extend_from_slice(format!("  /XObject << /Im{} {} 0 R >>\n", page_idx, image_obj_num).as_bytes());
+        pdf_data.extend_from_slice(b">>\n");
+        
+        // Reference to content stream object
+        pdf_data.extend_from_slice(format!("/Contents {} 0 R\n", 3 + pages.len() * 2 + page_idx).as_bytes());
+        pdf_data.extend_from_slice(b">>\n");
+        pdf_data.extend_from_slice(b"endobj\n");
+        
+        // Image XObject
+        object_offsets.push(pdf_data.len());
+        pdf_data.extend_from_slice(format!("{} 0 obj\n", image_obj_num).as_bytes());
+        pdf_data.extend_from_slice(b"<<\n");
+        pdf_data.extend_from_slice(b"/Type /XObject\n");
+        pdf_data.extend_from_slice(b"/Subtype /Image\n");
+        pdf_data.extend_from_slice(format!("/Width {}\n", page.width).as_bytes());
+        pdf_data.extend_from_slice(format!("/Height {}\n", page.height).as_bytes());
+        pdf_data.extend_from_slice(b"/ColorSpace /DeviceRGB\n");
+        pdf_data.extend_from_slice(b"/BitsPerComponent 8\n");
+        pdf_data.extend_from_slice(format!("/Length {}\n", page.pixels.len()).as_bytes());
+        pdf_data.extend_from_slice(b">>\n");
+        pdf_data.extend_from_slice(b"stream\n");
+        pdf_data.extend_from_slice(&page.pixels);
+        pdf_data.extend_from_slice(b"\nendstream\n");
+        pdf_data.extend_from_slice(b"endobj\n");
+    }
+    
+    // Content stream objects for each page
+    for (page_idx, page) in pages.iter().enumerate() {
+        let width_pts = (page.width as f32) / DPI * 72.0;
+        let height_pts = (page.height as f32) / DPI * 72.0;
+        let content = format!("q\n{:.2} 0 0 {:.2} 0 0 cm\n/Im{} Do\nQ\n", width_pts, height_pts, page_idx);
+        
+        let content_obj_num = 3 + pages.len() * 2 + page_idx;
+        object_offsets.push(pdf_data.len());
+        pdf_data.extend_from_slice(format!("{} 0 obj\n", content_obj_num).as_bytes());
+        pdf_data.extend_from_slice(b"<<\n");
+        pdf_data.extend_from_slice(format!("/Length {}\n", content.len()).as_bytes());
+        pdf_data.extend_from_slice(b">>\n");
+        pdf_data.extend_from_slice(b"stream\n");
+        pdf_data.extend_from_slice(content.as_bytes());
+        pdf_data.extend_from_slice(b"\nendstream\n");
+        pdf_data.extend_from_slice(b"endobj\n");
+    }
+    
+    // Cross-reference table
+    let xref_offset = pdf_data.len();
+    let num_objects = object_offsets.len();
+    pdf_data.extend_from_slice(b"xref\n");
+    pdf_data.extend_from_slice(format!("0 {}\n", num_objects + 1).as_bytes());
+    pdf_data.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &object_offsets {
+        pdf_data.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+    }
+    
+    // Trailer
+    pdf_data.extend_from_slice(b"trailer\n");
+    pdf_data.extend_from_slice(b"<<\n");
+    pdf_data.extend_from_slice(format!("/Size {}\n", num_objects + 1).as_bytes());
+    pdf_data.extend_from_slice(b"/Root 1 0 R\n");
+    pdf_data.extend_from_slice(b">>\n");
+    pdf_data.extend_from_slice(b"startxref\n");
+    pdf_data.extend_from_slice(format!("{}\n", xref_offset).as_bytes());
+    pdf_data.extend_from_slice(b"%%EOF\n");
+    
+    writer.write_all(&pdf_data).context("Failed to write PDF data")?;
     Ok(())
 }
 
