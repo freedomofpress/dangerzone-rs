@@ -11,58 +11,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  test-unit:
-    name: Unit Tests
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ matrix.rust }}
-    
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-registry-
-    
-    - name: Cache cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-git-
-    
-    - name: Cache target directory
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-target-
-    
-    - name: Run unit tests
-      run: cargo test --bin dangerzone-rs
-    
-    - name: Run clippy
-      run: cargo clippy --all-targets -- -D warnings
-    
-    - name: Check formatting
-      run: cargo fmt -- --check
-
-  test-integration-linux:
-    name: Integration Tests (Linux/Podman)
+  test:
+    name: Test on Linux
     runs-on: ubuntu-latest
     
     steps:
@@ -70,6 +20,8 @@ jobs:
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
     
     - name: Install dependencies
       run: |
@@ -83,101 +35,26 @@ jobs:
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-integration-
+          ${{ runner.os }}-cargo-
     
-    - name: Pull Dangerzone image
-      run: podman pull ghcr.io/freedomofpress/dangerzone/v1
+    - name: Check formatting
+      run: cargo fmt --all -- --check
     
-    - name: Build project
-      run: cargo build --release
-    
-    - name: Run integration tests
-      run: cargo test --test integration_test -- --ignored --test-threads=4
-      env:
-        RUST_TEST_THREADS: 4
-
-  test-integration-macos:
-    name: Integration Tests (macOS/Podman)
-    runs-on: macos-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Install Podman
-      run: |
-        brew install podman poppler
-        podman machine init
-        podman machine start
-    
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-integration-
-    
-    - name: Pull Dangerzone image
-      run: podman pull ghcr.io/freedomofpress/dangerzone/v1
-    
-    - name: Build project
-      run: cargo build --release
-    
-    - name: Run integration tests
-      run: cargo test --test integration_test -- --ignored --test-threads=4
-      env:
-        RUST_TEST_THREADS: 4
-
-  test-integration-windows:
-    name: Integration Tests (Windows)
-    runs-on: windows-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-integration-
+    - name: Run clippy
+      run: cargo clippy --all-targets -- -D warnings
     
     - name: Build project
       run: cargo build --release
     
     - name: Run unit tests
       run: cargo test --bin dangerzone-rs
-      # Windows podman setup is complex, so we only run unit tests
-
-  lint:
-    name: Lint and Format Check
-    runs-on: ubuntu-latest
     
-    steps:
-    - uses: actions/checkout@v4
+    - name: Pull Dangerzone image
+      run: podman pull ghcr.io/freedomofpress/dangerzone/v1
     
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-    
-    - name: Check formatting
-      run: cargo fmt --all -- --check
-    
-    - name: Run clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+    - name: Run integration tests
+      run: cargo test --test integration_test -- --ignored --test-threads=4
+      env:
+        RUST_TEST_THREADS: 4
