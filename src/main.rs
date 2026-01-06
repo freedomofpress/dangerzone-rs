@@ -183,14 +183,7 @@ fn convert_pixels_to_pdf(pages: &[PageData], output_path: &str) -> Result<()> {
         PdfDocument::new("Sanitized Document", Mm(width_mm), Mm(height_mm), "Layer 1");
 
     // Add first page image
-    add_page_to_pdf(
-        &doc,
-        &mut page_index,
-        &mut layer_index,
-        &pages[0],
-        width_mm,
-        height_mm,
-    )?;
+    add_page_to_pdf(&doc, &mut page_index, &mut layer_index, &pages[0])?;
 
     // Add remaining pages
     for (i, page) in pages.iter().enumerate().skip(1) {
@@ -205,14 +198,7 @@ fn convert_pixels_to_pdf(pages: &[PageData], output_path: &str) -> Result<()> {
         page_index = new_page_index;
         layer_index = new_layer_index;
 
-        add_page_to_pdf(
-            &doc,
-            &mut page_index,
-            &mut layer_index,
-            page,
-            width_mm,
-            height_mm,
-        )?;
+        add_page_to_pdf(&doc, &mut page_index, &mut layer_index, page)?;
     }
 
     // Save the PDF
@@ -230,8 +216,6 @@ fn add_page_to_pdf(
     page_index: &mut PdfPageIndex,
     layer_index: &mut PdfLayerIndex,
     page: &PageData,
-    width_mm: f32,
-    height_mm: f32,
 ) -> Result<()> {
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
         ImageBuffer::from_raw(page.width as u32, page.height as u32, page.pixels.clone())
@@ -241,13 +225,10 @@ fn add_page_to_pdf(
     let image = Image::from_dynamic_image(&dynamic_img);
 
     let layer = doc.get_page(*page_index).get_layer(*layer_index);
+
     image.add_to_layer(
         layer.clone(),
         ImageTransform {
-            translate_x: Some(Mm(0.0)),
-            translate_y: Some(Mm(0.0)),
-            scale_x: Some(Mm(width_mm).0),
-            scale_y: Some(Mm(height_mm).0),
             dpi: Some(DPI),
             ..Default::default()
         },
@@ -273,4 +254,47 @@ fn main() -> Result<()> {
     eprintln!("Conversion completed successfully!");
     eprintln!("Processed {} page(s)", pages.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_page_size_calculation() {
+        let width_pixels = 1500u16;
+        let height_pixels = 2000u16;
+        let dpi = 150.0f32;
+
+        let width_mm = (width_pixels as f32) / dpi * 25.4;
+        let height_mm = (height_pixels as f32) / dpi * 25.4;
+
+        assert_eq!(width_mm, 254.0);
+        assert_eq!(height_mm, 338.66666);
+    }
+
+    #[test]
+    fn test_pixel_data_parsing() {
+        let mut data = Vec::new();
+        
+        let page_count: u16 = 1;
+        data.extend_from_slice(&page_count.to_be_bytes());
+        
+        let width: u16 = 100;
+        let height: u16 = 50;
+        data.extend_from_slice(&width.to_be_bytes());
+        data.extend_from_slice(&height.to_be_bytes());
+        
+        let num_pixels = (width as usize) * (height as usize) * 3;
+        data.extend(vec![128u8; num_pixels]);
+
+        let result = parse_pixel_data(&data);
+        assert!(result.is_ok());
+        
+        let pages = result.unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].width, width);
+        assert_eq!(pages[0].height, height);
+        assert_eq!(pages[0].pixels.len(), num_pixels);
+    }
 }
