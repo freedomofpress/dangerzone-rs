@@ -223,6 +223,7 @@ dependencies = [
  "clap",
  "image",
  "printpdf",
+ "rayon",
  "tempfile",
  "thiserror",
  "walkdir",

@@ -1,5 +1,7 @@
 # dangerzone.rs
 
+[![CI](https://github.com/almet/dangerzone.rs/workflows/CI/badge.svg)](https://github.com/almet/dangerzone.rs/actions)
+
 A command-line implementation of Dangerzone in Rust.
 
 ## Overview
@@ -71,6 +73,8 @@ The implementation supports all formats supported by the Dangerzone container:
 
 ## Testing
 
+### Local Testing
+
 Unit tests:
 ```bash
 cargo test
@@ -85,8 +89,8 @@ podman pull ghcr.io/freedomofpress/dangerzone/v1
 # On Ubuntu/Debian: sudo apt-get install poppler-utils
 # On macOS: brew install poppler
 
-# Run all integration tests (tests all files in test_docs/inputs/ automatically)
-cargo test --test integration_test -- --ignored
+# Run all integration tests in parallel (tests all files in test_docs/inputs/ automatically)
+cargo test --test integration_test -- --ignored --test-threads=4
 
 # Run single test
 cargo test --test integration_test test_single_docx -- --ignored
@@ -94,6 +98,16 @@ cargo test --test integration_test test_single_docx -- --ignored
 # Regenerate all reference PDFs (useful after code changes)
 cargo test --test integration_test regenerate_all_references -- --ignored --nocapture
 ```
+
+### Continuous Integration
+
+The project uses GitHub Actions for CI/CD with the following workflows:
+
+- **Unit Tests**: Run on Ubuntu, macOS, and Windows with stable Rust
+- **Integration Tests**: Run on Ubuntu and macOS with podman
+- **Linting**: Format checking and clippy on all platforms
+
+Tests are parallelized using rayon for faster execution. The integration test suite typically completes in under 5 minutes on CI with 4 parallel threads.
 
 ### Test Organization
 

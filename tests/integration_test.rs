@@ -1,7 +1,9 @@
 use image::GenericImageView;
+use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use walkdir::WalkDir;
 
 const INPUTS_DIR: &str = "test_docs/inputs";
@@ -196,12 +198,12 @@ fn test_all_documents() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("No test files found in {} directory", INPUTS_DIR).into());
     }
 
-    let mut failed_tests = Vec::new();
-    let mut passed = 0;
-    let mut total = 0;
+    let total = test_cases.len();
+    let failed_tests = Arc::new(Mutex::new(Vec::new()));
+    let passed = Arc::new(Mutex::new(0));
 
-    for test_case in test_cases {
-        total += 1;
+    // Use parallel iterator for faster test execution
+    test_cases.par_iter().for_each(|test_case| {
         let input_name = test_case
             .input_path
             .file_name()
@@ -213,21 +215,33 @@ fn test_all_documents() -> Result<(), Box<dyn std::error::Error>> {
         let output_path = PathBuf::from(format!("/tmp/test-output-{}.pdf", input_name));
 
         // Run conversion
-        let conversion_succeeded = run_conversion(&test_case.input_path, &output_path)?;
+        let conversion_succeeded = match run_conversion(&test_case.input_path, &output_path) {
+            Ok(success) => success,
+            Err(e) => {
+                failed_tests
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}: Conversion error: {}", input_name, e));
+                return;
+            }
+        };
 
         // Check if result matches expectation
         if test_case.should_succeed {
             if !conversion_succeeded {
-                failed_tests.push(format!(
+                failed_tests.lock().unwrap().push(format!(
                     "{}: Expected success but conversion failed",
                     input_name
                 ));
-                continue;
+                return;
             }
 
             if !output_path.exists() {
-                failed_tests.push(format!("{}: Output PDF not created", input_name));
-                continue;
+                failed_tests
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}: Output PDF not created", input_name));
+                return;
             }
 
             // Compare with reference if available
@@ -235,25 +249,40 @@ fn test_all_documents() -> Result<(), Box<dyn std::error::Error>> {
                 match compare_pdfs_pixel_by_pixel(&output_path, ref_path) {
                     Ok(true) => {
                         println!("✓ {}: Pixel comparison passed", input_name);
-                        passed += 1;
+                        *passed.lock().unwrap() += 1;
                     }
                     Ok(false) => {
-                        failed_tests.push(format!("{}: PDF comparison failed", input_name));
+                        failed_tests
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}: PDF comparison failed", input_name));
                     }
                     Err(e) => {
                         eprintln!("Warning: Could not compare PDFs: {}", e);
                         // Fall back to size comparison
-                        if compare_pdf_sizes(&output_path, ref_path)? {
-                            println!("✓ {}: Size comparison passed", input_name);
-                            passed += 1;
-                        } else {
-                            failed_tests.push(format!("{}: Size comparison failed", input_name));
+                        match compare_pdf_sizes(&output_path, ref_path) {
+                            Ok(true) => {
+                                println!("✓ {}: Size comparison passed", input_name);
+                                *passed.lock().unwrap() += 1;
+                            }
+                            Ok(false) => {
+                                failed_tests
+                                    .lock()
+                                    .unwrap()
+                                    .push(format!("{}: Size comparison failed", input_name));
+                            }
+                            Err(e) => {
+                                failed_tests
+                                    .lock()
+                                    .unwrap()
+                                    .push(format!("{}: Comparison error: {}", input_name, e));
+                            }
                         }
                     }
                 }
             } else {
                 println!("✓ {}: Conversion succeeded (no reference)", input_name);
-                passed += 1;
+                *passed.lock().unwrap() += 1;
             }
 
             // Clean up
@@ -261,27 +290,30 @@ fn test_all_documents() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             // Test should fail
             if conversion_succeeded {
-                failed_tests.push(format!(
+                failed_tests.lock().unwrap().push(format!(
                     "{}: Expected failure but conversion succeeded",
                     input_name
                 ));
             } else {
                 println!("✓ {}: Failed as expected", input_name);
-                passed += 1;
+                *passed.lock().unwrap() += 1;
             }
         }
-    }
+    });
+
+    let passed_count = *passed.lock().unwrap();
+    let failed = failed_tests.lock().unwrap();
 
     println!("\n========================================");
-    println!("Test Results: {}/{} passed", passed, total);
+    println!("Test Results: {}/{} passed", passed_count, total);
     println!("========================================");
 
-    if !failed_tests.is_empty() {
+    if !failed.is_empty() {
         println!("\nFailed tests:");
-        for failure in &failed_tests {
+        for failure in failed.iter() {
             println!("  ✗ {}", failure);
         }
-        return Err(format!("{} test(s) failed", failed_tests.len()).into());
+        return Err(format!("{} test(s) failed", failed.len()).into());
     }
 
     Ok(())
