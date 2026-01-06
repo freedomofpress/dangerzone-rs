@@ -272,9 +272,9 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
     for (page_idx, page) in pages.iter().enumerate() {
         let width_pts = (page.width as f32) / DPI * 72.0;
         let height_pts = (page.height as f32) / DPI * 72.0;
-        // Scale and flip the image to fill the page
-        // Matrix: [width 0 0 -height 0 height] flips Y-axis and positions image correctly
-        let content = format!("q\n{:.2} 0 0 {:.2} 0 {:.2} cm\n/Im{} Do\nQ\n", width_pts, -height_pts, height_pts, page_idx);
+        // Scale the image to fill the page
+        // The image XObject is drawn in a 1x1 unit space, this scales it to page size
+        let content = format!("q\n{:.2} 0 0 {:.2} 0 0 cm\n/Im{} Do\nQ\n", width_pts, height_pts, page_idx);
         
         let content_obj_num = 3 + pages.len() * 2 + page_idx;
         object_offsets.push(pdf_data.len());
