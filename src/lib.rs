@@ -71,7 +71,7 @@ pub fn parse_pixel_data(data: Vec<u8>) -> Result<Vec<PageData>> {
     let page_count = read_u16_be(&data[pos..pos + INT_BYTES])?;
     pos += INT_BYTES;
 
-    eprintln!("Document has {} page(s)", page_count);
+    eprintln!("Document has {page_count} page(s)");
 
     let mut pages = Vec::new();
 
@@ -137,13 +137,12 @@ pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
         .stderr(Stdio::inherit())
         .spawn()
         .context(format!(
-            "Failed to spawn container. Make sure podman is installed and the image '{}' is pulled.",
-            IMAGE_NAME
+            "Failed to spawn container. Make sure podman is installed and the image '{IMAGE_NAME}' is pulled."
         ))?;
 
     // Read the input document
     let mut input_file =
-        File::open(&input_path).context(format!("Failed to open input file '{}'", input_path))?;
+        File::open(&input_path).context(format!("Failed to open input file '{input_path}'"))?;
     let mut input_data = Vec::new();
     input_file
         .read_to_end(&mut input_data)
@@ -181,10 +180,10 @@ pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
     }
 
     let mut file = File::create(&output_path)
-        .context(format!("Failed to create output file '{}'", output_path))?;
+        .context(format!("Failed to create output file '{output_path}'"))?;
     write_pdf(&mut file, &pages).context("Failed to write PDF")?;
 
-    eprintln!("Safe PDF created successfully at: {}", output_path);
+    eprintln!("Safe PDF created successfully at: {output_path}");
     Ok(())
 }
 
@@ -194,7 +193,7 @@ pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool
     let pages = parse_pixel_data(pixels_data)?;
 
     let temp_output = if apply_ocr {
-        format!("{}.temp.pdf", output_path)
+        format!("{output_path}.temp.pdf")
     } else {
         output_path.clone()
     };
@@ -258,16 +257,16 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
         let image_obj_num = page_obj_num + 1;
 
         object_offsets.push(pdf_data.len());
-        pdf_data.extend_from_slice(format!("{} 0 obj\n", page_obj_num).as_bytes());
+        pdf_data.extend_from_slice(format!("{page_obj_num} 0 obj\n").as_bytes());
         pdf_data.extend_from_slice(b"<<\n");
         pdf_data.extend_from_slice(b"/Type /Page\n");
         pdf_data.extend_from_slice(b"/Parent 2 0 R\n");
         pdf_data.extend_from_slice(
-            format!("/MediaBox [0 0 {:.2} {:.2}]\n", width_pts, height_pts).as_bytes(),
+            format!("/MediaBox [0 0 {width_pts:.2} {height_pts:.2}]\n").as_bytes(),
         );
         pdf_data.extend_from_slice(b"/Resources <<\n");
         pdf_data.extend_from_slice(
-            format!("  /XObject << /Im{} {} 0 R >>\n", page_idx, image_obj_num).as_bytes(),
+            format!("  /XObject << /Im{page_idx} {image_obj_num} 0 R >>\n").as_bytes(),
         );
         pdf_data.extend_from_slice(b">>\n");
 
@@ -280,7 +279,7 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
 
         // Image XObject
         object_offsets.push(pdf_data.len());
-        pdf_data.extend_from_slice(format!("{} 0 obj\n", image_obj_num).as_bytes());
+        pdf_data.extend_from_slice(format!("{image_obj_num} 0 obj\n").as_bytes());
         pdf_data.extend_from_slice(b"<<\n");
         pdf_data.extend_from_slice(b"/Type /XObject\n");
         pdf_data.extend_from_slice(b"/Subtype /Image\n");
@@ -309,14 +308,12 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
     for (page_idx, page) in pages.iter().enumerate() {
         let width_pts = (page.width as f32) / DPI * 72.0;
         let height_pts = (page.height as f32) / DPI * 72.0;
-        let content = format!(
-            "q\n{:.2} 0 0 {:.2} 0 0 cm\n/Im{} Do\nQ\n",
-            width_pts, height_pts, page_idx
-        );
+        let content =
+            format!("q\n{width_pts:.2} 0 0 {height_pts:.2} 0 0 cm\n/Im{page_idx} Do\nQ\n");
 
         let content_obj_num = 3 + pages.len() * 2 + page_idx;
         object_offsets.push(pdf_data.len());
-        pdf_data.extend_from_slice(format!("{} 0 obj\n", content_obj_num).as_bytes());
+        pdf_data.extend_from_slice(format!("{content_obj_num} 0 obj\n").as_bytes());
         pdf_data.extend_from_slice(b"<<\n");
         pdf_data.extend_from_slice(format!("/Length {}\n", content.len()).as_bytes());
         pdf_data.extend_from_slice(b">>\n");
@@ -333,7 +330,7 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
     pdf_data.extend_from_slice(format!("0 {}\n", num_objects + 1).as_bytes());
     pdf_data.extend_from_slice(b"0000000000 65535 f \n");
     for offset in &object_offsets {
-        pdf_data.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+        pdf_data.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
     }
 
     // Trailer
@@ -343,7 +340,7 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
     pdf_data.extend_from_slice(b"/Root 1 0 R\n");
     pdf_data.extend_from_slice(b">>\n");
     pdf_data.extend_from_slice(b"startxref\n");
-    pdf_data.extend_from_slice(format!("{}\n", xref_offset).as_bytes());
+    pdf_data.extend_from_slice(format!("{xref_offset}\n").as_bytes());
     pdf_data.extend_from_slice(b"%%EOF\n");
 
     writer
@@ -380,13 +377,13 @@ pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
         }
         Ok(result) => {
             let stderr = String::from_utf8_lossy(&result.stderr);
-            eprintln!("Warning: OCR failed: {}", stderr);
+            eprintln!("Warning: OCR failed: {stderr}");
             eprintln!("Falling back to PDF without OCR");
             std::fs::copy(&input_pdf, &output_pdf).context("Failed to copy PDF")?;
             Ok(())
         }
         Err(e) => {
-            eprintln!("Warning: ocrmypdf not found or failed: {}", e);
+            eprintln!("Warning: ocrmypdf not found or failed: {e}");
             eprintln!("Falling back to PDF without OCR");
             eprintln!("To enable OCR, install ocrmypdf: pip install ocrmypdf");
             std::fs::copy(&input_pdf, &output_pdf).context("Failed to copy PDF")?;
@@ -579,10 +576,7 @@ mod tests {
         let estimated_uncompressed_pdf_size = uncompressed_pixel_size + 1000;
 
         eprintln!("PDF size with compression: {} bytes", pdf_data.len());
-        eprintln!(
-            "Estimated uncompressed size: {} bytes",
-            estimated_uncompressed_pdf_size
-        );
+        eprintln!("Estimated uncompressed size: {estimated_uncompressed_pdf_size} bytes");
         eprintln!(
             "Compression ratio: {:.2}%",
             (pdf_data.len() as f32 / estimated_uncompressed_pdf_size as f32) * 100.0

@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion)]
+
 use crate::{
     apply_ocr_fn as core_apply_ocr_fn, convert_doc_to_pixels as core_convert_doc_to_pixels,
     convert_document as core_convert_document, parse_pixel_data as core_parse_pixel_data,
