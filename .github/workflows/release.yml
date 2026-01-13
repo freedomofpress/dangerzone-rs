@@ -86,6 +86,20 @@ jobs:
         run: |
           strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
+      - name: Test built artifact
+        # Skip testing for cross-compiled ARM binaries (can't execute them on x86_64)
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          # Test that the binary exists
+          test -f target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          
+          # Test that the binary can show version
+          target/${{ matrix.target }}/release/${{ matrix.artifact_name }} --version
+          
+          # Test that the binary can show help
+          target/${{ matrix.target }}/release/${{ matrix.artifact_name }} --help
+
       - name: Rename binary
         shell: bash
         run: |

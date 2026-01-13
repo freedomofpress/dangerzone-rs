@@ -46,3 +46,23 @@ jobs:
     
     - name: Build project
       run: cargo build --release
+    
+    - name: Test built artifact
+      run: |
+        # Test that the binary was built
+        test -f target/release/dangerzone-rs
+        
+        # Test that the binary is executable
+        test -x target/release/dangerzone-rs
+        
+        # Test that the binary can show version
+        ./target/release/dangerzone-rs --version
+        
+        # Test that the binary can show help
+        ./target/release/dangerzone-rs --help
+        
+        # Test that the binary shows error with missing arguments (should exit with non-zero)
+        if ./target/release/dangerzone-rs 2>&1; then
+          echo "ERROR: Binary should fail with missing arguments"
+          exit 1
+        fi
