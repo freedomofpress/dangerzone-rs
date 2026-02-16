@@ -360,7 +360,7 @@ pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
 
     // Fall back to ocrmypdf (for non-macOS or if PDFKit fails)
     let output = Command::new("ocrmypdf")
-        .args(["--skip-text", "--force-ocr", &input_pdf, &output_pdf])
+        .args(["--redo-ocr", &input_pdf, &output_pdf])
         .output();
 
     match output {
