@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use dangerzone_rs::convert_document;
+use util::replace_control_chars;
+
+mod util;
 
 /// A simple Dangerzone CLI implementation in Rust
 #[derive(Parser, Debug)]
@@ -24,8 +27,14 @@ fn main() -> Result<()> {
 
     eprintln!("Dangerzone Rust CLI");
     eprintln!("Using container runtime: podman");
-    eprintln!("Input: {}", args.input);
-    eprintln!("Output: {}", args.output);
+    eprintln!(
+        "Input: {input_sanitized}",
+        input_sanitized = replace_control_chars(&args.input, false)
+    );
+    eprintln!(
+        "Output: {output_sanitized}",
+        output_sanitized = replace_control_chars(&args.output, false)
+    );
     if args.ocr {
         eprintln!("OCR: enabled");
     }
