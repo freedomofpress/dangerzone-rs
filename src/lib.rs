@@ -2,12 +2,16 @@ use anyhow::{Context, Result};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
+use util::replace_control_chars;
+
+mod util;
 
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
 pub const INT_BYTES: usize = 2;
 pub const DPI: f32 = 150.0;
+const MAX_SANITIZED_CHUNK_BYTES: u64 = 64 * 1024;
 
 fn get_security_args() -> Vec<String> {
     vec![
@@ -108,6 +112,47 @@ pub fn parse_pixel_data(data: Vec<u8>) -> Result<Vec<PageData>> {
     Ok(pages)
 }
 
+/// Read from a source (mostly locked stderr/stdout) and write sanitized
+/// text to given output. Output is marked as untrusted
+fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
+    mut reader: R,
+    mut out: W,
+) -> Result<()> {
+    const ANSI_GRAY: &str = "\x1b[90m";
+    const ANSI_RESET: &str = "\x1b[0m";
+    const UNTRUSTED_PREFIX: &str = "UNTRUSTED> ";
+
+    let mut line_buf = Vec::new();
+    loop {
+        line_buf.clear();
+        let n = reader
+            .by_ref()
+            .take(MAX_SANITIZED_CHUNK_BYTES)
+            .read_until(b'\n', &mut line_buf)
+            .context("Failed to read output for sanitizing")?;
+        if n == 0 {
+            break;
+        }
+
+        let s = String::from_utf8_lossy(&line_buf);
+        let mut sanitized: String = replace_control_chars(&s, true);
+        if !sanitized.ends_with('\n') {
+            sanitized.push('\n');
+        }
+        let sanitized_untrusted_prefix = if out.is_terminal() {
+            format!("{ANSI_GRAY}{UNTRUSTED_PREFIX}{sanitized}{ANSI_RESET}")
+        } else {
+            format!("{UNTRUSTED_PREFIX}{sanitized}")
+        };
+
+        out.write_all(sanitized_untrusted_prefix.as_bytes())
+            .context("Failed to write sanitized output")?;
+        out.flush().context("Failed to flush sanitized output")?;
+    }
+
+    Ok(())
+}
+
 /// Convert a document to raw RGB pixel data using the Dangerzone container
 pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
     eprintln!("Converting document to pixels...");
@@ -127,15 +172,26 @@ pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .context(format!(
             "Failed to spawn container. Make sure podman is installed and the image '{IMAGE_NAME}' is pulled."
         ))?;
 
+    // Take ownership of child stderr pipe and output sanitized text to parent stderr
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to take ownership of stderr")?;
+    let stderr_thread = std::thread::spawn(move || -> Result<()> {
+        forward_sanitized_text(BufReader::new(stderr), std::io::stderr().lock())
+    });
+
     // Read the input document
-    let mut input_file =
-        File::open(&input_path).context(format!("Failed to open input file '{input_path}'"))?;
+    let mut input_file = File::open(&input_path).context(format!(
+        "Failed to open input file '{input_path_sanitized}'",
+        input_path_sanitized = replace_control_chars(&input_path, false)
+    ))?;
     let mut input_data = Vec::new();
     input_file
         .read_to_end(&mut input_data)
@@ -152,6 +208,20 @@ pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
     let output = child
         .wait_with_output()
         .context("Failed to wait for container")?;
+
+    // Read stderr from the container
+    match stderr_thread.join() {
+        Err(_) => {
+            eprintln!("Warning: stderr_thread panicked while forwarding container stderr");
+        }
+        Ok(Err(e)) => {
+            eprintln!(
+                "Warning: Failed to forward container stderr: {err_sanitized}",
+                err_sanitized = replace_control_chars(&e.to_string(), true)
+            );
+        }
+        Ok(Ok(_)) => {}
+    }
 
     if !output.status.success() {
         anyhow::bail!(
@@ -172,11 +242,16 @@ pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
         anyhow::bail!("No pages to convert");
     }
 
-    let mut file = File::create(&output_path)
-        .context(format!("Failed to create output file '{output_path}'"))?;
+    let mut file = File::create(&output_path).context(format!(
+        "Failed to create output file '{output_path_sanitized}'",
+        output_path_sanitized = replace_control_chars(&output_path, false)
+    ))?;
     write_pdf(&mut file, &pages).context("Failed to write PDF")?;
 
-    eprintln!("Safe PDF created successfully at: {output_path}");
+    eprintln!(
+        "Safe PDF created successfully at: {output_path_sanitized}",
+        output_path_sanitized = replace_control_chars(&output_path, false)
+    );
     Ok(())
 }
 
@@ -352,7 +427,10 @@ pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
         match apply_ocr_macos(&input_pdf, &output_pdf) {
             Ok(()) => return Ok(()),
             Err(e) => {
-                eprintln!("Warning: macOS PDFKit OCR failed: {}", e);
+                eprintln!(
+                    "Warning: macOS PDFKit OCR failed: {stderr_sanitized}",
+                    stderr_sanitized = replace_control_chars(&e.to_string(), true)
+                );
                 eprintln!("Falling back to ocrmypdf...");
             }
         }
@@ -370,7 +448,10 @@ pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
         }
         Ok(result) => {
             let stderr = String::from_utf8_lossy(&result.stderr);
-            eprintln!("Warning: OCR failed: {stderr}");
+            eprintln!(
+                "Warning: OCR failed: {stderr_sanitized}",
+                stderr_sanitized = replace_control_chars(&stderr, true)
+            );
             eprintln!("Falling back to PDF without OCR");
             std::fs::copy(&input_pdf, &output_pdf).context("Failed to copy PDF")?;
             Ok(())
@@ -405,8 +486,12 @@ fn apply_ocr_macos(input_pdf: &str, output_pdf: &str) -> Result<()> {
         anyhow::bail!("macOS OCR script not found at {:?}", script_path);
     }
 
-    let input_absolute = std::fs::canonicalize(input_pdf)
-        .with_context(|| format!("Failed to get absolute path for input: {}", input_pdf))?;
+    let input_absolute = std::fs::canonicalize(input_pdf).with_context(|| {
+        format!(
+            "Failed to get absolute path for input: {input_pdf_sanitized}",
+            input_pdf_sanitized = replace_control_chars(input_pdf, false)
+        )
+    })?;
     let output_absolute = std::path::Path::new(output_pdf)
         .canonicalize()
         .unwrap_or_else(|_| {
@@ -430,7 +515,10 @@ fn apply_ocr_macos(input_pdf: &str, output_pdf: &str) -> Result<()> {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Swift OCR script failed: {}", stderr)
+        anyhow::bail!(
+            "Swift OCR script failed: {stderr_sanitized}",
+            stderr_sanitized = replace_control_chars(&stderr, true)
+        )
     }
 }
 
@@ -597,5 +685,47 @@ mod tests {
 
         let result = apply_ocr_macos(input_path, output_path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_forward_sanitized_text() {
+        let input = concat!(
+            "plain ✓ café 😀\n",
+            "\x1b[31mANSI escaped\n",
+            "red text.\x1b[0m\n",
+            "\ttab\rline\n",
+            "a\u{200E}b\u{E000}c\u{0378}d\u{2028}e\u{2029}f\n",
+            "x\n",
+            "\u{2028}\u{2029}y\n",
+            "ok line\n",
+            "\x1b[31mred\x1b[0m\n",
+            "end",
+        );
+        let expected_output = concat!(
+            "UNTRUSTED> plain ✓ café 😀\n",
+            "UNTRUSTED> \u{FFFD}[31mANSI escaped\n",
+            "UNTRUSTED> red text.\u{FFFD}[0m\n",
+            "UNTRUSTED> \u{FFFD}tab\u{FFFD}line\n",
+            "UNTRUSTED> a\u{FFFD}b\u{FFFD}c\u{FFFD}d\u{FFFD}e\u{FFFD}f\n",
+            "UNTRUSTED> x\n",
+            "UNTRUSTED> \u{FFFD}\u{FFFD}y\n",
+            "UNTRUSTED> ok line\n",
+            "UNTRUSTED> \u{FFFD}[31mred\u{FFFD}[0m\n",
+            "UNTRUSTED> end",
+        );
+
+        let reader = BufReader::new(std::io::Cursor::new(input.as_bytes()));
+        let out = tempfile::NamedTempFile::new().unwrap();
+        let out_path = out.path().to_path_buf();
+        let out_file = out.reopen().unwrap();
+
+        forward_sanitized_text(reader, out_file).unwrap();
+
+        let output_bytes = std::fs::read(out_path).unwrap();
+        let output = String::from_utf8(output_bytes).unwrap();
+        assert_eq!(
+            output, expected_output,
+            "forward_sanitized_text failed for input: {input:?}",
+        );
     }
 }
