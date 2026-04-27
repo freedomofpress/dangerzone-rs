@@ -43,14 +43,20 @@ With OCR:
 dangerzone-rs --input unsafe.pdf --output safe.pdf --ocr
 ```
 
+With OCR backend selection:
+```bash
+dangerzone-rs --input unsafe.pdf --output safe.pdf --ocr --ocr-backend kreuzberg
+dangerzone-rs --input unsafe.pdf --output safe.pdf --ocr --ocr-backend ocrmypdf
+```
+
 **Note on OCR**:
 
-- On **macOS**, the tool uses PDFKit's built-in `saveTextFromOCROption` for
-  OCR, which is faster and doesn't require additional dependencies.
-- On **other platforms**, OCR can be enabled by installing `ocrmypdf`:
-  ```bash
-  pip install ocrmypdf
-  ```
+- OCR uses `kreuzberg-tesseract` to recognize text from the sanitized page
+  pixels and adds an invisible text layer to the generated PDF by default.
+- `--ocr-backend ocrmypdf` uses the external `ocrmypdf` command instead.
+- Tesseract language data must be available at runtime. English OCR uses
+  `eng.traineddata`; set `TESSDATA_PREFIX` if it is not in a standard system
+  location.
 
 ### Python Library
 
@@ -82,7 +88,11 @@ python demo/demo.py
   ```bash
   podman pull ghcr.io/freedomofpress/dangerzone/v1
   ```
-- **ocrmypdf** (optional): For OCR on non-macOS platforms:
+- **Tesseract language data** (optional, required for `--ocr`): for example,
+  `eng.traineddata` for English OCR.
+- **CMake and a C++ compiler** (required to build OCR support): `kreuzberg-tesseract`
+  statically builds Tesseract and Leptonica.
+- **ocrmypdf** (optional, required only for `--ocr-backend ocrmypdf`):
   ```bash
   pip install ocrmypdf
   ```
@@ -90,6 +100,7 @@ python demo/demo.py
 ## Prerequisites (CLI)
 
 - Rust (for building the binary from source)
+- CMake and a C++ compiler
 - Podman
 - Dangerzone container image:
   ```bash

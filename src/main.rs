@@ -1,6 +1,6 @@
 use anyhow::Result;
-use clap::Parser;
-use dangerzone_rs::convert_document;
+use clap::{Parser, ValueEnum};
+use dangerzone_rs::{convert_document_with_ocr_backend, OcrBackend};
 use util::replace_control_chars;
 
 mod util;
@@ -20,6 +20,25 @@ struct Args {
     /// Enable OCR to add text layer to PDF
     #[arg(long, default_value = "false")]
     ocr: bool,
+
+    /// OCR backend to use when --ocr is enabled
+    #[arg(long, value_enum, default_value_t = CliOcrBackend::Kreuzberg)]
+    ocr_backend: CliOcrBackend,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliOcrBackend {
+    Kreuzberg,
+    Ocrmypdf,
+}
+
+impl From<CliOcrBackend> for OcrBackend {
+    fn from(value: CliOcrBackend) -> Self {
+        match value {
+            CliOcrBackend::Kreuzberg => OcrBackend::Kreuzberg,
+            CliOcrBackend::Ocrmypdf => OcrBackend::Ocrmypdf,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -37,10 +56,11 @@ fn main() -> Result<()> {
     );
     if args.ocr {
         eprintln!("OCR: enabled");
+        eprintln!("OCR backend: {:?}", args.ocr_backend);
     }
     eprintln!();
 
-    convert_document(args.input, args.output, args.ocr)?;
+    convert_document_with_ocr_backend(args.input, args.output, args.ocr, args.ocr_backend.into())?;
 
     eprintln!();
     eprintln!("Conversion completed successfully!");

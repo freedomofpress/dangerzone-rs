@@ -1,9 +1,15 @@
 use anyhow::{Context, Result};
+use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
+use kreuzberg_tesseract::{TessPageSegMode, TesseractAPI};
+use std::collections::BTreeMap;
+use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use util::replace_control_chars;
 
 mod util;
@@ -12,6 +18,12 @@ pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
 pub const INT_BYTES: usize = 2;
 pub const DPI: f32 = 150.0;
 const MAX_SANITIZED_CHUNK_BYTES: u64 = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OcrBackend {
+    Kreuzberg,
+    Ocrmypdf,
+}
 
 fn get_security_args() -> Vec<String> {
     vec![
@@ -54,6 +66,15 @@ impl PageData {
             pixels,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct OcrWord {
+    text: String,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
 }
 
 /// Parse binary pixel data stream from the container
@@ -238,15 +259,7 @@ pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
 pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
     eprintln!("Converting pixels to safe PDF...");
 
-    if pages.is_empty() {
-        anyhow::bail!("No pages to convert");
-    }
-
-    let mut file = File::create(&output_path).context(format!(
-        "Failed to create output file '{output_path_sanitized}'",
-        output_path_sanitized = replace_control_chars(&output_path, false)
-    ))?;
-    write_pdf(&mut file, &pages).context("Failed to write PDF")?;
+    write_pdf_file(&pages, &output_path).context("Failed to write PDF")?;
 
     eprintln!(
         "Safe PDF created successfully at: {output_path_sanitized}",
@@ -257,27 +270,73 @@ pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
 
 /// Convert a document to a safe PDF in one call
 pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool) -> Result<()> {
+    convert_document_with_ocr_backend(input_path, output_path, apply_ocr, OcrBackend::Kreuzberg)
+}
+
+/// Convert a document to a safe PDF in one call, with selectable OCR backend.
+pub fn convert_document_with_ocr_backend(
+    input_path: String,
+    output_path: String,
+    apply_ocr: bool,
+    ocr_backend: OcrBackend,
+) -> Result<()> {
     let pixels_data = convert_doc_to_pixels(input_path)?;
     let pages = parse_pixel_data(pixels_data)?;
 
-    let temp_output = if apply_ocr {
-        format!("{output_path}.temp.pdf")
-    } else {
-        output_path.clone()
-    };
-
-    pixels_to_pdf(pages.clone(), temp_output.clone()).context("Failed to convert pixels to PDF")?;
-
-    if apply_ocr {
-        apply_ocr_fn(temp_output.clone(), output_path.clone())?;
-        std::fs::remove_file(&temp_output).context("Failed to remove temporary file")?;
+    if !apply_ocr {
+        return pixels_to_pdf(pages, output_path);
     }
 
-    Ok(())
+    match ocr_backend {
+        OcrBackend::Kreuzberg => {
+            eprintln!("Applying OCR to PDF with Kreuzberg backend...");
+            match apply_ocr_to_pages_with_kreuzberg(&pages, &output_path) {
+                Ok(()) => {
+                    eprintln!("OCR applied successfully using Kreuzberg");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: OCR failed: {stderr_sanitized}",
+                        stderr_sanitized = replace_control_chars(&e.to_string(), true)
+                    );
+                    eprintln!("Falling back to PDF without OCR");
+                    pixels_to_pdf(pages, output_path)
+                }
+            }
+        }
+        OcrBackend::Ocrmypdf => {
+            let temp_output = format!("{output_path}.temp.pdf");
+            pixels_to_pdf(pages, temp_output.clone()).context("Failed to convert pixels to PDF")?;
+            apply_ocr_with_backend(temp_output.clone(), output_path, ocr_backend)?;
+            std::fs::remove_file(&temp_output).context("Failed to remove temporary file")?;
+            Ok(())
+        }
+    }
 }
 
 /// Write a minimal PDF file with embedded RGB pixel data
 fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
+    write_pdf_with_text_layers(writer, pages, None)
+}
+
+fn write_pdf_file(pages: &[PageData], output_path: &str) -> Result<()> {
+    if pages.is_empty() {
+        anyhow::bail!("No pages to convert");
+    }
+
+    let mut file = File::create(output_path).context(format!(
+        "Failed to create output file '{output_path_sanitized}'",
+        output_path_sanitized = replace_control_chars(output_path, false)
+    ))?;
+    write_pdf(&mut file, pages)
+}
+
+fn write_pdf_with_text_layers<W: Write>(
+    writer: &mut W,
+    pages: &[PageData],
+    text_layers: Option<&[Vec<OcrWord>]>,
+) -> Result<()> {
     let mut pdf_data = Vec::new();
     let mut object_offsets = Vec::new();
 
@@ -303,12 +362,23 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
     // Build kids array
     let mut kids = String::from("/Kids [");
     for i in 0..pages.len() {
-        kids.push_str(&format!("{} 0 R ", 3 + i * 2));
+        kids.push_str(&format!("{} 0 R ", 4 + i * 2));
     }
     kids.push_str("]\n");
     pdf_data.extend_from_slice(kids.as_bytes());
 
     pdf_data.extend_from_slice(format!("/Count {}\n", pages.len()).as_bytes());
+    pdf_data.extend_from_slice(b">>\n");
+    pdf_data.extend_from_slice(b"endobj\n");
+
+    // Object 3: built-in font used only by the invisible OCR text layer.
+    object_offsets.push(pdf_data.len());
+    pdf_data.extend_from_slice(b"3 0 obj\n");
+    pdf_data.extend_from_slice(b"<<\n");
+    pdf_data.extend_from_slice(b"/Type /Font\n");
+    pdf_data.extend_from_slice(b"/Subtype /Type1\n");
+    pdf_data.extend_from_slice(b"/BaseFont /Helvetica\n");
+    pdf_data.extend_from_slice(b"/Encoding /WinAnsiEncoding\n");
     pdf_data.extend_from_slice(b">>\n");
     pdf_data.extend_from_slice(b"endobj\n");
 
@@ -321,7 +391,7 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
         let height_pts = (page.height as f32) / DPI * 72.0;
 
         // Page object
-        let page_obj_num = 3 + page_idx * 2;
+        let page_obj_num = 4 + page_idx * 2;
         let image_obj_num = page_obj_num + 1;
 
         object_offsets.push(pdf_data.len());
@@ -336,11 +406,12 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
         pdf_data.extend_from_slice(
             format!("  /XObject << /Im{page_idx} {image_obj_num} 0 R >>\n").as_bytes(),
         );
+        pdf_data.extend_from_slice(b"  /Font << /F1 3 0 R >>\n");
         pdf_data.extend_from_slice(b">>\n");
 
         // Reference to content stream object
         pdf_data.extend_from_slice(
-            format!("/Contents {} 0 R\n", 3 + pages.len() * 2 + page_idx).as_bytes(),
+            format!("/Contents {} 0 R\n", 4 + pages.len() * 2 + page_idx).as_bytes(),
         );
         pdf_data.extend_from_slice(b">>\n");
         pdf_data.extend_from_slice(b"endobj\n");
@@ -376,10 +447,15 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
     for (page_idx, page) in pages.iter().enumerate() {
         let width_pts = (page.width as f32) / DPI * 72.0;
         let height_pts = (page.height as f32) / DPI * 72.0;
-        let content =
+        let mut content =
             format!("q\n{width_pts:.2} 0 0 {height_pts:.2} 0 0 cm\n/Im{page_idx} Do\nQ\n");
+        if let Some(layers) = text_layers {
+            if let Some(words) = layers.get(page_idx) {
+                content.push_str(&build_text_layer(words, page.height));
+            }
+        }
 
-        let content_obj_num = 3 + pages.len() * 2 + page_idx;
+        let content_obj_num = 4 + pages.len() * 2 + page_idx;
         object_offsets.push(pdf_data.len());
         pdf_data.extend_from_slice(format!("{content_obj_num} 0 obj\n").as_bytes());
         pdf_data.extend_from_slice(b"<<\n");
@@ -417,53 +493,440 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
     Ok(())
 }
 
-/// Apply OCR to add text layer to PDF (platform-aware)
-pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
-    eprintln!("Applying OCR to PDF...");
-
-    // On macOS, try using PDFKit's saveTextFromOCROption first
-    #[cfg(target_os = "macos")]
-    {
-        match apply_ocr_macos(&input_pdf, &output_pdf) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                eprintln!(
-                    "Warning: macOS PDFKit OCR failed: {stderr_sanitized}",
-                    stderr_sanitized = replace_control_chars(&e.to_string(), true)
-                );
-                eprintln!("Falling back to ocrmypdf...");
-            }
-        }
+fn build_text_layer(words: &[OcrWord], page_height_px: u16) -> String {
+    if words.is_empty() {
+        return String::new();
     }
 
-    // Fall back to ocrmypdf (for non-macOS or if PDFKit fails)
-    let output = Command::new("ocrmypdf")
-        .args([&input_pdf, &output_pdf])
-        .output();
+    let mut content = String::new();
+    for word in words {
+        let visual_text = pdf_escape_visible_text(&word.text);
+        if visual_text.is_empty() {
+            continue;
+        }
+        let actual_text = pdf_utf16be_hex_text(&word.text);
 
-    match output {
-        Ok(result) if result.status.success() => {
-            eprintln!("OCR applied successfully");
+        let height = (word.bottom - word.top).max(1) as f32;
+        let x = word.left.max(0) as f32 / DPI * 72.0;
+        let y = (page_height_px as f32 - word.bottom.max(0) as f32) / DPI * 72.0;
+        let font_size = (height / DPI * 72.0).max(1.0);
+        let width = (word.right - word.left).max(1) as f32 / DPI * 72.0;
+        let estimated_text_width = word.text.chars().count().max(1) as f32 * font_size * 0.5;
+        let horizontal_scale = (width / estimated_text_width * 100.0).clamp(40.0, 200.0);
+
+        content.push_str(&format!(
+            "/Span << /ActualText <{actual_text}> >> BDC\nBT\n/F1 1 Tf\n3 Tr\n{font_size:.2} 0 0 {font_size:.2} {x:.2} {y:.2} Tm\n{horizontal_scale:.2} Tz\n({visual_text}) Tj\nET\nEMC\n"
+        ));
+    }
+    content
+}
+
+fn pdf_escape_visible_text(text: &str) -> String {
+    let mut escaped = String::new();
+    for ch in text.chars() {
+        match ch {
+            '(' | ')' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            '\n' | '\r' | '\t' => escaped.push(' '),
+            ' '..='~' => escaped.push(ch),
+            _ => escaped.push('?'),
+        }
+    }
+    escaped
+}
+
+fn pdf_utf16be_hex_text(text: &str) -> String {
+    let mut hex = String::with_capacity(4 + text.len() * 4);
+    hex.push_str("FEFF");
+    for unit in text.encode_utf16() {
+        let _ = write!(&mut hex, "{unit:04X}");
+    }
+    hex
+}
+
+fn format_duration(duration: Duration) -> String {
+    format!("{:.3}s", duration.as_secs_f64())
+}
+
+/// Apply OCR to add an invisible text layer to a PDF generated by this crate.
+pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
+    apply_ocr_with_backend(input_pdf, output_pdf, OcrBackend::Kreuzberg)
+}
+
+pub fn apply_ocr_with_backend(
+    input_pdf: String,
+    output_pdf: String,
+    ocr_backend: OcrBackend,
+) -> Result<()> {
+    eprintln!("Applying OCR to PDF with {ocr_backend:?} backend...");
+
+    let result = match ocr_backend {
+        OcrBackend::Kreuzberg => apply_ocr_with_kreuzberg(&input_pdf, &output_pdf),
+        OcrBackend::Ocrmypdf => apply_ocr_with_ocrmypdf(&input_pdf, &output_pdf),
+    };
+
+    match result {
+        Ok(()) => {
+            eprintln!("OCR applied successfully using {ocr_backend:?}");
             Ok(())
         }
-        Ok(result) => {
-            let stderr = String::from_utf8_lossy(&result.stderr);
+        Err(e) => {
             eprintln!(
                 "Warning: OCR failed: {stderr_sanitized}",
-                stderr_sanitized = replace_control_chars(&stderr, true)
+                stderr_sanitized = replace_control_chars(&e.to_string(), true)
             );
             eprintln!("Falling back to PDF without OCR");
             std::fs::copy(&input_pdf, &output_pdf).context("Failed to copy PDF")?;
             Ok(())
         }
-        Err(e) => {
-            eprintln!("Warning: ocrmypdf not found or failed: {e}");
-            eprintln!("Falling back to PDF without OCR");
-            eprintln!("To enable OCR, install ocrmypdf: pip install ocrmypdf");
-            std::fs::copy(&input_pdf, &output_pdf).context("Failed to copy PDF")?;
-            Ok(())
-        }
     }
+}
+
+fn apply_ocr_with_ocrmypdf(input_pdf: &str, output_pdf: &str) -> Result<()> {
+    let started_at = Instant::now();
+    let output = Command::new("ocrmypdf")
+        .args([input_pdf, output_pdf])
+        .output()
+        .context("ocrmypdf not found or failed to start")?;
+    let elapsed = started_at.elapsed();
+    eprintln!("ocrmypdf OCR execution time: {}", format_duration(elapsed));
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!(
+        "ocrmypdf failed: {stderr_sanitized}",
+        stderr_sanitized = replace_control_chars(&stderr, true)
+    )
+}
+
+fn apply_ocr_with_kreuzberg(input_pdf: &str, output_pdf: &str) -> Result<()> {
+    let pages = extract_pages_from_generated_pdf(input_pdf).context(
+        "Failed to read image data from the generated PDF for OCR. OCR currently expects PDFs produced by dangerzone-rs",
+    )?;
+    apply_ocr_to_pages_with_kreuzberg(&pages, output_pdf)
+}
+
+fn apply_ocr_to_pages_with_kreuzberg(pages: &[PageData], output_pdf: &str) -> Result<()> {
+    let started_at = Instant::now();
+    let text_layers = ocr_pages(pages).context("Failed to OCR page pixels with Tesseract")?;
+    let elapsed = started_at.elapsed();
+    eprintln!("Kreuzberg OCR execution time: {}", format_duration(elapsed));
+
+    let mut file = File::create(output_pdf).context(format!(
+        "Failed to create OCR output file '{output_path_sanitized}'",
+        output_path_sanitized = replace_control_chars(output_pdf, false)
+    ))?;
+    write_pdf_with_text_layers(&mut file, pages, Some(&text_layers))
+        .context("Failed to write OCR text layer to PDF")?;
+    Ok(())
+}
+
+fn ocr_pages(pages: &[PageData]) -> Result<Vec<Vec<OcrWord>>> {
+    let language = std::env::var("DANGERZONE_OCR_LANG").unwrap_or_else(|_| "eng".to_string());
+    let tessdata_dir = resolve_tessdata_dir(&language);
+    let api = TesseractAPI::new().context("Failed to create Tesseract API")?;
+    api.init(&tessdata_dir, &language).with_context(|| {
+        format!(
+            "Failed to initialize Tesseract with language '{language}' and tessdata path '{}'",
+            tessdata_dir.display()
+        )
+    })?;
+    api.set_page_seg_mode(TessPageSegMode::PSM_AUTO)
+        .context("Failed to configure Tesseract page segmentation mode")?;
+
+    let mut layers = Vec::with_capacity(pages.len());
+    for (page_idx, page) in pages.iter().enumerate() {
+        eprintln!("Running OCR on page {}...", page_idx + 1);
+        if page.width == 0 || page.height == 0 {
+            anyhow::bail!("Cannot OCR a page with zero width or height");
+        }
+
+        api.clear()
+            .context("Failed to clear Tesseract state before OCR")?;
+        api.set_image(
+            &page.pixels,
+            i32::from(page.width),
+            i32::from(page.height),
+            3,
+            i32::from(page.width) * 3,
+        )
+        .context("Failed to pass page pixels to Tesseract")?;
+        api.set_source_resolution(DPI.round() as i32)
+            .context("Failed to set Tesseract source resolution")?;
+
+        api.recognize().context("Failed to recognize page text")?;
+        let tsv = api
+            .get_tsv_text(0)
+            .context("Failed to extract OCR TSV output")?;
+        let lines = parse_tesseract_tsv_words(&tsv);
+        eprintln!(
+            "OCR found {} text line(s) on page {}",
+            lines.len(),
+            page_idx + 1
+        );
+        layers.push(lines);
+    }
+
+    Ok(layers)
+}
+
+fn parse_tesseract_tsv_words(tsv: &str) -> Vec<OcrWord> {
+    #[derive(Default)]
+    struct OcrLine {
+        words: Vec<(i32, String)>,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        initialized: bool,
+    }
+
+    let mut lines: BTreeMap<(i32, i32, i32, i32), OcrLine> = BTreeMap::new();
+
+    for line in tsv.lines().skip(1) {
+        let mut fields = line.split('\t');
+        let level = match fields.next().and_then(|field| field.parse::<u8>().ok()) {
+            Some(level) => level,
+            None => continue,
+        };
+        if level != 5 {
+            continue;
+        }
+
+        let page_num = match fields.next().and_then(|field| field.parse::<i32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let block_num = match fields.next().and_then(|field| field.parse::<i32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let par_num = match fields.next().and_then(|field| field.parse::<i32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let line_num = match fields.next().and_then(|field| field.parse::<i32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        fields.next(); // word_num
+
+        let raw_left = match fields.next().and_then(|field| field.parse::<i32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let raw_top = match fields.next().and_then(|field| field.parse::<i32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let raw_width = match fields.next().and_then(|field| field.parse::<i32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let raw_height = match fields.next().and_then(|field| field.parse::<i32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let confidence = match fields.next().and_then(|field| field.parse::<f32>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let text = fields.collect::<Vec<_>>().join("\t").trim().to_string();
+
+        if text.is_empty() || confidence < 0.0 || raw_width <= 0 || raw_height <= 0 {
+            continue;
+        }
+
+        let entry = lines
+            .entry((page_num, block_num, par_num, line_num))
+            .or_default();
+        let left = raw_left;
+        let top = raw_top;
+        let right = raw_left + raw_width;
+        let bottom = raw_top + raw_height;
+        if entry.initialized {
+            entry.left = entry.left.min(left);
+            entry.top = entry.top.min(top);
+            entry.right = entry.right.max(right);
+            entry.bottom = entry.bottom.max(bottom);
+        } else {
+            entry.left = left;
+            entry.top = top;
+            entry.right = right;
+            entry.bottom = bottom;
+            entry.initialized = true;
+        }
+        entry.words.push((left, text));
+    }
+
+    lines
+        .into_values()
+        .filter_map(|mut line| {
+            line.words.sort_by_key(|(left, _)| *left);
+            let text = line
+                .words
+                .into_iter()
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.is_empty() || !line.initialized {
+                return None;
+            }
+            Some(OcrWord {
+                text,
+                left: line.left,
+                top: line.top,
+                right: line.right,
+                bottom: line.bottom,
+            })
+        })
+        .collect()
+}
+
+fn resolve_tessdata_dir(language: &str) -> PathBuf {
+    let first_language = language.split('+').next().unwrap_or("eng");
+
+    if let Ok(prefix) = std::env::var("TESSDATA_PREFIX") {
+        let path = PathBuf::from(prefix);
+        if has_traineddata(&path, first_language) {
+            return path;
+        }
+        let nested = path.join("tessdata");
+        if has_traineddata(&nested, first_language) {
+            return nested;
+        }
+        return path;
+    }
+
+    let mut candidates = vec![
+        PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"),
+        PathBuf::from("/usr/share/tesseract-ocr/4.00/tessdata"),
+        PathBuf::from("/usr/share/tessdata"),
+        PathBuf::from("/usr/local/share/tessdata"),
+        PathBuf::from("/opt/homebrew/share/tessdata"),
+    ];
+
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join(".kreuzberg-tesseract")
+                .join("tessdata"),
+        );
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        candidates.push(
+            PathBuf::from(appdata)
+                .join("kreuzberg-tesseract")
+                .join("tessdata"),
+        );
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| has_traineddata(path, first_language))
+        .unwrap_or_default()
+}
+
+fn has_traineddata(path: &Path, language: &str) -> bool {
+    path.join(format!("{language}.traineddata")).exists()
+}
+
+fn extract_pages_from_generated_pdf(input_pdf: &str) -> Result<Vec<PageData>> {
+    let data = std::fs::read(input_pdf).context(format!(
+        "Failed to read input PDF '{input_path_sanitized}'",
+        input_path_sanitized = replace_control_chars(input_pdf, false)
+    ))?;
+    let mut pages = Vec::new();
+    let mut search_pos = 0;
+
+    while let Some(relative_pos) = find_bytes(&data[search_pos..], b"/Subtype /Image") {
+        let image_pos = search_pos + relative_pos;
+        let dict_start = rfind_bytes(&data[..image_pos], b"<<").unwrap_or(image_pos);
+        let stream_pos = find_bytes(&data[image_pos..], b"stream\n")
+            .map(|pos| image_pos + pos)
+            .or_else(|| find_bytes(&data[image_pos..], b"stream\r\n").map(|pos| image_pos + pos))
+            .context("Failed to find image stream in generated PDF")?;
+        let stream_marker_len = if data[stream_pos..].starts_with(b"stream\r\n") {
+            b"stream\r\n".len()
+        } else {
+            b"stream\n".len()
+        };
+        let dict = &data[dict_start..stream_pos];
+        let width = parse_pdf_dict_usize(dict, b"/Width").context("Image stream missing /Width")?;
+        let height =
+            parse_pdf_dict_usize(dict, b"/Height").context("Image stream missing /Height")?;
+        let length =
+            parse_pdf_dict_usize(dict, b"/Length").context("Image stream missing /Length")?;
+        let stream_start = stream_pos + stream_marker_len;
+        let stream_end = stream_start
+            .checked_add(length)
+            .filter(|end| *end <= data.len())
+            .context("Image stream length extends past end of PDF")?;
+
+        let mut decoder = ZlibDecoder::new(&data[stream_start..stream_end]);
+        let mut pixels = Vec::new();
+        decoder
+            .read_to_end(&mut pixels)
+            .context("Failed to decompress image stream")?;
+
+        let expected_pixels = width
+            .checked_mul(height)
+            .and_then(|px| px.checked_mul(3))
+            .context("Image dimensions overflowed")?;
+        if pixels.len() != expected_pixels {
+            anyhow::bail!(
+                "Unexpected image stream size: got {} byte(s), expected {}",
+                pixels.len(),
+                expected_pixels
+            );
+        }
+
+        pages.push(PageData {
+            width: u16::try_from(width).context("Image width exceeds u16")?,
+            height: u16::try_from(height).context("Image height exceeds u16")?,
+            pixels,
+        });
+        search_pos = stream_end;
+    }
+
+    if pages.is_empty() {
+        anyhow::bail!("No generated image pages found in PDF");
+    }
+
+    Ok(pages)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn rfind_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+fn parse_pdf_dict_usize(dict: &[u8], key: &[u8]) -> Option<usize> {
+    let key_pos = find_bytes(dict, key)?;
+    let mut pos = key_pos + key.len();
+    while pos < dict.len() && dict[pos].is_ascii_whitespace() {
+        pos += 1;
+    }
+    let start = pos;
+    while pos < dict.len() && dict[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    if pos == start {
+        return None;
+    }
+    std::str::from_utf8(&dict[start..pos]).ok()?.parse().ok()
 }
 
 #[cfg(target_os = "macos")]
