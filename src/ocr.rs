@@ -18,3 +18,16 @@ struct OcrWord {
     /// Height of the word-box
     h: i32,
 }
+
+/// Trait implemented by OCR backends
+///
+/// This trait provides a generic contract for doing OCR on a page which
+/// the different OCR backends will follow. This way we keep our OCR
+/// implementation modular.
+trait OcrBackend {
+    /// Detect words on a single page
+    ///
+    /// `pixels` must contain `width * height * 3` bytes in RGB order.
+    fn ocr_page(&self, pixels: &[u8], width: u16, height: u16) -> Vec<OcrWord>;
+}
+
