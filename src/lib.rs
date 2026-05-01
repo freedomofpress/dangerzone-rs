@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
 use util::replace_control_chars;
 
+mod ocr;
 mod util;
 
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
