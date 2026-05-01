@@ -277,6 +277,25 @@ pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool
     Ok(())
 }
 
+/// Escape text for use inside a PDF literal string
+fn escape_pdf_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+
+    for ch in text.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '(' => escaped.push_str("\\("),
+            ')' => escaped.push_str("\\)"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+
+    escaped
+}
+
 /// Write a minimal PDF file with embedded RGB pixel data
 fn write_pdf<W: Write>(
     writer: &mut W,
@@ -351,6 +370,12 @@ fn write_pdf<W: Write>(
         pdf_data.extend_from_slice(
             format!("  /XObject << /Im{page_idx} {image_obj_num} 0 R >>\n").as_bytes(),
         );
+        if ocr_pages.is_some() {
+            // Font for hidden OCR text
+            pdf_data.extend_from_slice(
+                b"  /Font << /Focr << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>\n",
+            );
+        }
         pdf_data.extend_from_slice(b">>\n");
 
         // Reference to content stream object
@@ -391,8 +416,27 @@ fn write_pdf<W: Write>(
     for (page_idx, page) in pages.iter().enumerate() {
         let width_pts = (page.width as f32) / DPI * 72.0;
         let height_pts = (page.height as f32) / DPI * 72.0;
-        let content =
+        let mut content =
             format!("q\n{width_pts:.2} 0 0 {height_pts:.2} 0 0 cm\n/Im{page_idx} Do\nQ\n");
+
+        if let Some(ocr_page) = ocr_pages.and_then(|pages| pages.get(page_idx)) {
+            // OCR gives word boxes in page pixels, measured from the top-left.
+            // PDF text positions use points, measured from the bottom-left, so
+            // each word position must be scaled and flipped vertically.
+            let scale = 72.0 / DPI;
+
+            for word in ocr_page.words() {
+                let x_pts = word.x() as f32 * scale;
+                let y_pts = height_pts - ((word.y() + word.h()) as f32 * scale);
+                let font_size = (word.h() as f32 * scale).max(1.0);
+                let text = escape_pdf_text(word.text());
+
+                // Rendering mode 3 adds invisible text to the page.
+                content.push_str(&format!(
+                    "BT\n3 Tr\n/Focr {font_size:.2} Tf\n1 0 0 1 {x_pts:.2} {y_pts:.2} Tm\n({text}) Tj\nET\n"
+                ));
+            }
+        }
 
         let content_obj_num = 3 + pages.len() * 2 + page_idx;
         object_offsets.push(pdf_data.len());
@@ -682,6 +726,45 @@ mod tests {
         assert!(
             pdf_data.len() < estimated_uncompressed_pdf_size / 2,
             "PDF with compression should be significantly smaller than uncompressed"
+        );
+    }
+
+    #[test]
+    fn test_pdf_generation_with_hidden_ocr_text() {
+        use std::io::Cursor;
+
+        let width = 10u16;
+        let height = 10u16;
+        let page = PageData {
+            width,
+            height,
+            pixels: vec![255; width as usize * height as usize * 3],
+        };
+        let pages = vec![page];
+        let ocr_pages = vec![ocr::OcrPage::from_test_words(vec![(
+            "hello (pdf)",
+            1,
+            2,
+            3,
+            4,
+        )])];
+
+        let mut buffer = Cursor::new(Vec::new());
+        let result = write_pdf(buffer.get_mut(), &pages, Some(&ocr_pages));
+        assert!(result.is_ok(), "PDF generation with OCR should succeed");
+
+        let pdf_data = String::from_utf8_lossy(&buffer.into_inner()).into_owned();
+        assert!(
+            pdf_data.contains("/Font << /Focr"),
+            "PDF should include OCR font resource"
+        );
+        assert!(
+            pdf_data.contains("3 Tr"),
+            "PDF should use invisible text rendering mode"
+        );
+        assert!(
+            pdf_data.contains("(hello \\(pdf\\)) Tj"),
+            "PDF should contain escaped OCR text"
         );
     }
 
