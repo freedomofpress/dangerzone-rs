@@ -256,10 +256,47 @@ pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
     Ok(())
 }
 
+/// Convert pixel data to a PDF file and add the provided OCR text layer
+fn pixels_to_pdf_with_ocr(
+    pages: &[PageData],
+    ocr_pages: &[ocr::OcrPage],
+    output_path: &str,
+) -> Result<()> {
+    eprintln!("Converting pixels to safe PDF with OCR text layer...");
+
+    if pages.is_empty() {
+        anyhow::bail!("No pages to convert");
+    }
+
+    let mut file = File::create(output_path).context(format!(
+        "Failed to create output file '{output_path_sanitized}'",
+        output_path_sanitized = replace_control_chars(output_path, false)
+    ))?;
+    write_pdf(&mut file, pages, Some(ocr_pages)).context("Failed to write PDF with OCR")?;
+
+    eprintln!(
+        "Safe PDF with OCR created successfully at: {output_path_sanitized}",
+        output_path_sanitized = replace_control_chars(output_path, false)
+    );
+    Ok(())
+}
+
 /// Convert a document to a safe PDF in one call
 pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool) -> Result<()> {
     let pixels_data = convert_doc_to_pixels(input_path)?;
     let pages = parse_pixel_data(pixels_data)?;
+
+    // TODO: When having the implementations for Apple Vision and windows.media.ocr I want to use
+    // conditional compilation flags to dynamically set the OCR backend.
+    #[cfg(target_os = "linux")]
+    if apply_ocr {
+        eprintln!("Applying OCR with integrated Linux backend...");
+
+        let backend = ocr::KreuzbergTesseractOcr;
+        let ocr_pages = ocr::ocr_pages(&pages, &backend);
+        return pixels_to_pdf_with_ocr(&pages, &ocr_pages, &output_path)
+            .context("Failed to convert pixels to OCR PDF");
+    }
 
     let temp_output = if apply_ocr {
         format!("{output_path}.temp.pdf")

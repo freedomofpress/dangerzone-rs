@@ -94,7 +94,7 @@ impl OcrPage {
 /// This trait provides a generic contract for doing OCR on a page which
 /// the different OCR backends will follow. This way we keep our OCR
 /// implementation modular.
-trait OcrBackend {
+pub(crate) trait OcrBackend {
     /// Detect words on a single page
     ///
     /// `pixels` must contain `width * height * 3` bytes in RGB order.
@@ -102,7 +102,7 @@ trait OcrBackend {
 }
 
 /// Run OCR for multiple pages with specified OCR-backend
-fn ocr_pages<B: OcrBackend>(pages: &[PageData], backend: &B) -> Vec<OcrPage> {
+pub(crate) fn ocr_pages<B: OcrBackend>(pages: &[PageData], backend: &B) -> Vec<OcrPage> {
     pages
         .iter()
         .map(|page| backend.ocr_page(&page.pixels, page.width, page.height))
@@ -110,7 +110,7 @@ fn ocr_pages<B: OcrBackend>(pages: &[PageData], backend: &B) -> Vec<OcrPage> {
 }
 
 /// OCR backend powered by the `kreuzberg-tesseract` used for Linux
-struct KreuzbergTesseractOcr;
+pub(crate) struct KreuzbergTesseractOcr;
 
 impl KreuzbergTesseractOcr {
     /// Resolve the tessdata directory used to initialize Tesseract
