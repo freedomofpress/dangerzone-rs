@@ -14,7 +14,7 @@ pub const DEFAULT_DPI: i32 = 150;
 /// word is wrapped in this object together with the positioning
 /// and sizing properties.
 #[derive(Debug)]
-struct OcrWord {
+pub(crate) struct OcrWord {
     /// Text-content of the word
     text: String,
     /// x-axis positioning
@@ -27,7 +27,34 @@ struct OcrWord {
     h: i32,
 }
 
-/// Object for each page in a document 
+impl OcrWord {
+    /// Get text-content of word
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Get x-axis positioning
+    pub(crate) fn x(&self) -> i32 {
+        self.x
+    }
+
+    /// Get y-axis positioning
+    pub(crate) fn y(&self) -> i32 {
+        self.y
+    }
+
+    /// Get width of word-box
+    pub(crate) fn w(&self) -> i32 {
+        self.w
+    }
+
+    /// Get height of word-box
+    pub(crate) fn h(&self) -> i32 {
+        self.h
+    }
+}
+
+/// Object for each page in a document
 ///
 /// An `OcrPage` contains it's `OcrWord`'s. Together they
 /// form the whole document.
@@ -39,6 +66,26 @@ pub(crate) struct OcrPage {
 impl OcrPage {
     fn new(words: Vec<OcrWord>) -> Self {
         Self { words }
+    }
+
+    pub(crate) fn words(&self) -> &[OcrWord] {
+        &self.words
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_words(words: Vec<(&str, i32, i32, i32, i32)>) -> Self {
+        Self::new(
+            words
+                .into_iter()
+                .map(|(text, x, y, w, h)| OcrWord {
+                    text: text.to_string(),
+                    x,
+                    y,
+                    w,
+                    h,
+                })
+                .collect(),
+        )
     }
 }
 
