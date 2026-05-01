@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::PageData;
-use kreuzberg_tesseract::{Pix, TessPageIteratorLevel, TesseractAPI};
+use kreuzberg_tesseract::{Pix, TesseractAPI};
 
 /// DPI used by container
 pub const DEFAULT_DPI: i32 = 150;
@@ -119,10 +119,30 @@ impl KreuzbergTesseractOcr {
     /// bundled by `kreuzberg-tesseract`.
     fn tessdata_dir() -> Option<PathBuf> {
         if let Ok(path) = std::env::var("TESSDATA_PREFIX") {
-            return Some(PathBuf::from(path));
+            return Some(Self::as_tessdata_dir(PathBuf::from(path)));
         }
 
-        option_env!("TESSDATA_PREFIX_BUNDLED").map(PathBuf::from)
+        let mut candidates = Vec::new();
+
+        if let Some(path) = option_env!("TESSDATA_PREFIX_BUNDLED") {
+            candidates.push(Self::as_tessdata_dir(PathBuf::from(path)));
+        }
+        candidates.push(PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"));
+        candidates.push(PathBuf::from("/usr/share/tesseract-ocr/tessdata"));
+
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(PathBuf::from(home).join(".kreuzberg-tesseract/tessdata"));
+        }
+
+        candidates.into_iter().find(|path| path.exists())
+    }
+
+    fn as_tessdata_dir(path: PathBuf) -> PathBuf {
+        if path.ends_with("tessdata") {
+            path
+        } else {
+            path.join("tessdata")
+        }
     }
 }
 
@@ -167,29 +187,39 @@ impl OcrBackend for KreuzbergTesseractOcr {
         // read DPI from the engine state rather than from the Pix metadata.
         let _ = api.set_source_resolution(DEFAULT_DPI);
 
-        // Ask Tesseract for word-level text components. The returned boxes are
-        // image-coordinate rectangles: x, y, width, height.
-        let boxes = match api.get_component_images(TessPageIteratorLevel::RIL_WORD, true) {
-            Ok(boxes) => boxes,
+        if api.recognize().is_err() {
+            return OcrPage::new(Vec::new());
+        }
+
+        let iterator = match api.get_iterator() {
+            Ok(iterator) => iterator,
             Err(_) => return OcrPage::new(Vec::new()),
         };
 
-        // Put recognized words in a `OcrWord` object and return in vector.
-        let mut words = Vec::new();
-        for &(x, y, w, h) in boxes.iter() {
-            // Limit recognition to the current word box.
-            let _ = api.set_rectangle(x, y, w, h);
+        let words = match iterator.extract_all_words() {
+            Ok(words) => words,
+            Err(_) => return OcrPage::new(Vec::new()),
+        };
 
-            // Ask tesseract for text in word box.
-            if let Ok(text) = api.get_utf8_text() {
-                let text = text.trim().to_string(); // Remove obsoletely returned newlines and whitespaces.
-                if !text.is_empty() {
-                    words.push(OcrWord { text, x, y, w, h });
-                }
-            }
-        }
-
-        OcrPage::new(words)
+        OcrPage::new(
+            words
+                .into_iter()
+                .filter_map(|word| {
+                    let text = word.text.trim().to_string();
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(OcrWord {
+                            text,
+                            x: word.left,
+                            y: word.top,
+                            w: word.right - word.left,
+                            h: word.bottom - word.top,
+                        })
+                    }
+                })
+                .collect(),
+        )
     }
 }
 
