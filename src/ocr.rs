@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::PageData;
 use kreuzberg_tesseract::{Pix, TessPageIteratorLevel, TesseractAPI};
 
 /// DPI used by container
@@ -36,6 +37,14 @@ trait OcrBackend {
     ///
     /// `pixels` must contain `width * height * 3` bytes in RGB order.
     fn ocr_page(&self, pixels: &[u8], width: u16, height: u16) -> Vec<OcrWord>;
+}
+
+/// Run OCR for multiple pages with specified OCR-backend
+fn ocr_pages<B: OcrBackend>(pages: &[PageData], backend: &B) -> Vec<Vec<OcrWord>> {
+    pages
+        .iter()
+        .map(|page| backend.ocr_page(&page.pixels, page.width, page.height))
+        .collect()
 }
 
 /// OCR backend powered by the `kreuzberg-tesseract` used for Linux
@@ -119,5 +128,38 @@ impl OcrBackend for KreuzbergTesseractOcr {
         }
 
         words
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeOcrBackend;
+
+    impl OcrBackend for FakeOcrBackend {
+        fn ocr_page(&self, _pixels: &[u8], width: u16, height: u16) -> Vec<OcrWord> {
+            vec![OcrWord {
+                text: format!("{width}x{height}"),
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            }]
+        }
+    }
+
+    #[test]
+    fn ocr_pages_runs_backend_for_each_page() {
+        let pages = vec![
+            PageData::new(10, 20, vec![255; 10 * 20 * 3]),
+            PageData::new(30, 40, vec![255; 30 * 40 * 3]),
+        ];
+
+        let result = ocr_pages(&pages, &FakeOcrBackend);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0][0].text, "10x20");
+        assert_eq!(result[1][0].text, "30x40");
     }
 }
