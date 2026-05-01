@@ -247,7 +247,7 @@ pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
         "Failed to create output file '{output_path_sanitized}'",
         output_path_sanitized = replace_control_chars(&output_path, false)
     ))?;
-    write_pdf(&mut file, &pages).context("Failed to write PDF")?;
+    write_pdf(&mut file, &pages, None).context("Failed to write PDF")?;
 
     eprintln!(
         "Safe PDF created successfully at: {output_path_sanitized}",
@@ -278,7 +278,21 @@ pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool
 }
 
 /// Write a minimal PDF file with embedded RGB pixel data
-fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
+fn write_pdf<W: Write>(
+    writer: &mut W,
+    pages: &[PageData],
+    ocr_pages: Option<&[ocr::OcrPage]>,
+) -> Result<()> {
+    if let Some(ocr_pages) = ocr_pages {
+        if ocr_pages.len() != pages.len() {
+            anyhow::bail!(
+                "OCR page count ({}) does not match PDF page count ({})",
+                ocr_pages.len(),
+                pages.len()
+            );
+        }
+    }
+
     let mut pdf_data = Vec::new();
     let mut object_offsets = Vec::new();
 
@@ -592,7 +606,7 @@ mod tests {
         let pages = vec![page];
 
         let mut buffer = Cursor::new(Vec::new());
-        let result = write_pdf(buffer.get_mut(), &pages);
+        let result = write_pdf(buffer.get_mut(), &pages, None);
         assert!(result.is_ok(), "PDF generation should succeed");
 
         let pdf_data = buffer.into_inner();
@@ -648,7 +662,7 @@ mod tests {
         let pages = vec![page];
 
         let mut buffer = Cursor::new(Vec::new());
-        let result = write_pdf(buffer.get_mut(), &pages);
+        let result = write_pdf(buffer.get_mut(), &pages, None);
         assert!(result.is_ok(), "PDF generation should succeed");
 
         let pdf_data = buffer.into_inner();
