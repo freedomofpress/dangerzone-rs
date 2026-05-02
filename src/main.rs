@@ -1,48 +1,76 @@
 use anyhow::Result;
-use clap::Parser;
-use dangerzone_rs::convert_document;
+use clap::{Parser, Subcommand};
+use dangerzone_rs::{convert_document, cosign, IMAGE_NAME, TRUSTED_PUBKEY};
 use util::replace_control_chars;
 
 mod util;
 
-/// A simple Dangerzone CLI implementation in Rust
+/// Dangerzone – convert untrusted documents into safe PDFs
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
-    /// Input document path
-    #[arg(short, long)]
-    input: String,
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Output PDF path
-    #[arg(short, long)]
-    output: String,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Convert a document to a safe PDF
+    Convert {
+        /// Input document path
+        #[arg(short, long)]
+        input: String,
 
-    /// Enable OCR to add text layer to PDF
-    #[arg(long, default_value = "false")]
-    ocr: bool,
+        /// Output PDF path
+        #[arg(short, long)]
+        output: String,
+
+        /// Enable OCR to add a text layer to the PDF
+        #[arg(long, default_value = "false")]
+        ocr: bool,
+    },
+
+    /// Pull the container image, download, verify, and store its signatures.
+    ///
+    /// Run this once before using `convert` for the first time, and again
+    /// whenever a new image version is released.
+    Upgrade,
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
-
     eprintln!("Dangerzone Rust CLI");
     eprintln!("Using container runtime: podman");
-    eprintln!(
-        "Input: {input_sanitized}",
-        input_sanitized = replace_control_chars(&args.input, false)
-    );
-    eprintln!(
-        "Output: {output_sanitized}",
-        output_sanitized = replace_control_chars(&args.output, false)
-    );
-    if args.ocr {
-        eprintln!("OCR: enabled");
+    eprintln!();
+
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Convert { input, output, ocr } => {
+            eprintln!(
+                "Input:  {input_sanitized}",
+                input_sanitized = replace_control_chars(&input, false)
+            );
+            eprintln!(
+                "Output: {output_sanitized}",
+                output_sanitized = replace_control_chars(&output, false)
+            );
+            if ocr {
+                eprintln!("OCR: enabled");
+            }
+            eprintln!();
+
+            convert_document(input, output, ocr)?;
+
+            eprintln!();
+            eprintln!("Conversion completed successfully!");
+        }
+
+        Commands::Upgrade => {
+            cosign::upgrade_image(IMAGE_NAME, TRUSTED_PUBKEY)?;
+            eprintln!();
+            eprintln!("Upgrade completed successfully!");
+        }
     }
-    eprintln!();
 
-    convert_document(args.input, args.output, args.ocr)?;
-
-    eprintln!();
-    eprintln!("Conversion completed successfully!");
     Ok(())
 }

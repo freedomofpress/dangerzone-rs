@@ -7,8 +7,14 @@ use std::process::{Command, Stdio};
 use util::replace_control_chars;
 
 mod util;
+pub mod cosign;
 
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
+
+/// The trusted P-256 public key used to verify Dangerzone container image signatures.
+/// Embedded at compile time from `trusted-key.pub`.
+pub const TRUSTED_PUBKEY: &str = include_str!("../trusted-key.pub");
+
 pub const INT_BYTES: usize = 2;
 pub const DPI: f32 = 150.0;
 const MAX_SANITIZED_CHUNK_BYTES: u64 = 64 * 1024;
@@ -156,6 +162,21 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
 /// Convert a document to raw RGB pixel data using the Dangerzone container
 pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
     eprintln!("Converting document to pixels...");
+
+    // Verify the container image signature before using it.
+    // Set DANGERZONE_BYPASS_SIG_CHECKS=1 to skip (for development only).
+    if std::env::var("DANGERZONE_BYPASS_SIG_CHECKS").as_deref() == Ok("1") {
+        eprintln!(
+            "Warning: Signature verification bypassed via DANGERZONE_BYPASS_SIG_CHECKS. \
+             Do not use in production."
+        );
+    } else {
+        cosign::verify_image(IMAGE_NAME, TRUSTED_PUBKEY).context(
+            "Image signature verification failed. \
+             Run `dangerzone-rs upgrade` to pull the image and download its signatures, \
+             or set DANGERZONE_BYPASS_SIG_CHECKS=1 to skip (development only).",
+        )?;
+    }
 
     let mut args = vec!["run".to_string()];
     args.extend(get_security_args());
