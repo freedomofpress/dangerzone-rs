@@ -140,6 +140,35 @@ cross build --release --target x86_64-pc-windows-gnu
 Note: The CI builds Windows using MSVC on `windows-latest` for better compatibility.
 The GNU target above works for local development.
 
+## Testing
+
+Run the Rust test suite:
+
+```bash
+make test-rust
+# or directly:
+cargo test
+```
+
+Run the Python-binding smoke tests. This builds the PyO3 extension into a
+project-local virtualenv (`.venv-test/`) and runs `pytest`:
+
+```bash
+make test-python
+```
+
+Run everything:
+
+```bash
+make test
+```
+
+The Python tests are smoke tests for the FFI surface only: imports, the
+`PageData` constructor, `parse_pixel_data` round-trips, and `pixels_to_pdf`
+output structure. They don't require podman, network access, or `ocrmypdf`,
+so they're safe to run in CI. End-to-end conversion is exercised manually
+via `demo/demo.py`.
+
 ## How it works
 
 The container converts documents to a binary stream:
