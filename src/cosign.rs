@@ -28,7 +28,7 @@ use sha2::{Digest as _, Sha256};
 use sigstore::crypto::{CosignVerificationKey, Signature as SigstoreSignature};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Connection timeout for registry HTTP requests.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1126,6 +1126,92 @@ pub fn upgrade_image(image_name: &str, pubkey_pem: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Default maximum age before an automatic freshness check is triggered
+/// before a `convert`. 12 hours is a balance between catching new releases
+/// quickly and not hitting the registry on every conversion.
+pub const DEFAULT_UPGRADE_CHECK_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// Path of the "last upgrade check" timestamp file. Lives next to the stored
+/// signatures (under the public-key fingerprint directory) so it's bound to
+/// the same trust root.
+fn last_checked_path(pubkey_pem: &str) -> Result<PathBuf> {
+    Ok(signatures_dir(pubkey_pem)?.join("last-checked"))
+}
+
+/// Read the last upgrade-check timestamp (Unix seconds). Missing or
+/// malformed file is treated as "never checked".
+fn read_last_checked(pubkey_pem: &str) -> Option<SystemTime> {
+    let path = last_checked_path(pubkey_pem).ok()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    Some(UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+/// Persist the current time as the "last checked" timestamp. Best-effort:
+/// failures to write are non-fatal (the next convert will simply re-check).
+fn write_last_checked_now(pubkey_pem: &str) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("System clock is before UNIX epoch")?;
+    let path = last_checked_path(pubkey_pem)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Creating directory {}", parent.display()))?;
+    }
+    atomic_write(&path, now.as_secs().to_string().as_bytes())
+}
+
+/// Run [`upgrade_image`] if the last successful check is older than
+/// `max_age`. Intended to be called before `convert` so that conversions
+/// pick up new image versions automatically.
+///
+/// Behavior:
+/// - If the last-checked timestamp is fresh (within `max_age`), this is a
+///   no-op.
+/// - Otherwise [`upgrade_image`] is invoked. On success, the timestamp is
+///   advanced.
+/// - On failure (e.g. no network, registry down), a warning is printed and
+///   `Ok(())` is returned so the caller can continue with the locally
+///   cached image. The timestamp is **not** advanced on failure, so a
+///   subsequent run will retry.
+pub fn maybe_upgrade_image_if_stale(
+    image_name: &str,
+    pubkey_pem: &str,
+    max_age: Duration,
+) -> Result<()> {
+    if let Some(last) = read_last_checked(pubkey_pem) {
+        match SystemTime::now().duration_since(last) {
+            Ok(age) if age < max_age => {
+                crate::debugprint!(
+                    "Last upgrade check was {}s ago (< {}s); skipping.",
+                    age.as_secs(),
+                    max_age.as_secs()
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    crate::debugprint!("Running scheduled upgrade check...");
+    match upgrade_image(image_name, pubkey_pem) {
+        Ok(()) => {
+            // Best-effort timestamp update; not advancing it just means the
+            // next run will redo a (cheap) digest check.
+            if let Err(e) = write_last_checked_now(pubkey_pem) {
+                crate::debugprint!("Warning: failed to record last-checked timestamp: {e}");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: upgrade check failed: {e}. Proceeding with locally cached image."
+            );
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

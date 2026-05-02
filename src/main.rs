@@ -32,6 +32,10 @@ enum Commands {
         /// Enable OCR to add a text layer to the PDF
         #[arg(long, default_value = "false")]
         ocr: bool,
+
+        /// Skip the periodic upgrade check (use the locally cached image)
+        #[arg(long, default_value = "false")]
+        no_upgrade_check: bool,
     },
 
     /// Pull the container image, download, verify, and store its signatures.
@@ -50,7 +54,12 @@ fn main() -> Result<()> {
     debugprint!();
 
     match cli.command {
-        Commands::Convert { input, output, ocr } => {
+        Commands::Convert {
+            input,
+            output,
+            ocr,
+            no_upgrade_check,
+        } => {
             debugprint!(
                 "Input:  {input_sanitized}",
                 input_sanitized = replace_control_chars(&input, false)
@@ -63,6 +72,14 @@ fn main() -> Result<()> {
                 debugprint!("OCR: enabled");
             }
             debugprint!();
+
+            if !no_upgrade_check {
+                cosign::maybe_upgrade_image_if_stale(
+                    IMAGE_NAME,
+                    TRUSTED_PUBKEY,
+                    cosign::DEFAULT_UPGRADE_CHECK_INTERVAL,
+                )?;
+            }
 
             convert_document(input, output, ocr)?;
 
