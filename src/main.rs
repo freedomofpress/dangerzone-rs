@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dangerzone_rs::{convert_document, cosign, IMAGE_NAME, TRUSTED_PUBKEY};
+use dangerzone_rs::{convert_document, cosign, debugprint, set_debug, IMAGE_NAME, TRUSTED_PUBKEY};
 use util::replace_control_chars;
 
 mod util;
@@ -9,6 +9,10 @@ mod util;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    /// Print verbose progress information
+    #[arg(long, global = true)]
+    debug: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -38,37 +42,38 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    eprintln!("Dangerzone Rust CLI");
-    eprintln!("Using container runtime: podman");
-    eprintln!();
-
     let cli = Cli::parse();
+    set_debug(cli.debug);
+
+    debugprint!("Dangerzone Rust CLI");
+    debugprint!("Using container runtime: podman");
+    debugprint!();
 
     match cli.command {
         Commands::Convert { input, output, ocr } => {
-            eprintln!(
+            debugprint!(
                 "Input:  {input_sanitized}",
                 input_sanitized = replace_control_chars(&input, false)
             );
-            eprintln!(
+            debugprint!(
                 "Output: {output_sanitized}",
                 output_sanitized = replace_control_chars(&output, false)
             );
             if ocr {
-                eprintln!("OCR: enabled");
+                debugprint!("OCR: enabled");
             }
-            eprintln!();
+            debugprint!();
 
             convert_document(input, output, ocr)?;
 
-            eprintln!();
-            eprintln!("Conversion completed successfully!");
+            debugprint!();
+            debugprint!("Conversion completed successfully!");
         }
 
         Commands::Upgrade => {
             cosign::upgrade_image(IMAGE_NAME, TRUSTED_PUBKEY)?;
-            eprintln!();
-            eprintln!("Upgrade completed successfully!");
+            debugprint!();
+            debugprint!("Upgrade completed successfully!");
         }
     }
 

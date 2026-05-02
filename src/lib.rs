@@ -4,10 +4,41 @@ use flate2::Compression;
 use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use util::replace_control_chars;
 
-mod util;
 pub mod cosign;
+mod util;
+
+/// Global debug flag. When false (default), convert/upgrade flows emit a
+/// minimal summary; when true, they emit verbose progress information.
+static DEBUG: AtomicBool = AtomicBool::new(false);
+
+/// Enable or disable verbose ("debug") progress output. Called from `main`
+/// based on the `--debug` CLI flag.
+pub fn set_debug(enabled: bool) {
+    DEBUG.store(enabled, Ordering::Relaxed);
+}
+
+/// Returns true if verbose progress output is enabled.
+pub fn is_debug() -> bool {
+    DEBUG.load(Ordering::Relaxed)
+}
+
+/// `eprintln!`-equivalent that only prints when the global debug flag is set.
+#[macro_export]
+macro_rules! debugprint {
+    () => {
+        if $crate::is_debug() {
+            eprintln!();
+        }
+    };
+    ($($arg:tt)*) => {
+        if $crate::is_debug() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
 
@@ -74,7 +105,7 @@ pub fn parse_pixel_data(data: Vec<u8>) -> Result<Vec<PageData>> {
     let page_count = read_u16_be(&data[pos..pos + INT_BYTES])?;
     pos += INT_BYTES;
 
-    eprintln!("Document has {page_count} page(s)");
+    debugprint!("Document has {page_count} page(s)");
 
     let mut pages = Vec::new();
 
@@ -93,7 +124,7 @@ pub fn parse_pixel_data(data: Vec<u8>) -> Result<Vec<PageData>> {
         let height = read_u16_be(&data[pos..pos + INT_BYTES])?;
         pos += INT_BYTES;
 
-        eprintln!("Page {}: {}x{} pixels", page_num + 1, width, height);
+        debugprint!("Page {}: {}x{} pixels", page_num + 1, width, height);
 
         // Read pixel data (RGB, 3 bytes per pixel)
         let num_bytes = (width as usize) * (height as usize) * 3;
@@ -161,7 +192,7 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
 
 /// Convert a document to raw RGB pixel data using the Dangerzone container
 pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
-    eprintln!("Converting document to pixels...");
+    debugprint!("Converting document to pixels...");
 
     // Verify the container image signature before using it.
     // Set DANGERZONE_BYPASS_SIG_CHECKS=1 to skip (for development only).
@@ -251,13 +282,13 @@ pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
         );
     }
 
-    eprintln!("Document converted to pixels successfully");
+    debugprint!("Document converted to pixels successfully");
     Ok(output.stdout)
 }
 
 /// Convert pixel data to a PDF file
 pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
-    eprintln!("Converting pixels to safe PDF...");
+    debugprint!("Converting pixels to safe PDF...");
 
     if pages.is_empty() {
         anyhow::bail!("No pages to convert");
@@ -269,7 +300,7 @@ pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
     ))?;
     write_pdf(&mut file, &pages).context("Failed to write PDF")?;
 
-    eprintln!(
+    debugprint!(
         "Safe PDF created successfully at: {output_path_sanitized}",
         output_path_sanitized = replace_control_chars(&output_path, false)
     );
@@ -280,6 +311,7 @@ pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
 pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool) -> Result<()> {
     let pixels_data = convert_doc_to_pixels(input_path)?;
     let pages = parse_pixel_data(pixels_data)?;
+    let page_count = pages.len();
 
     let temp_output = if apply_ocr {
         format!("{output_path}.temp.pdf")
@@ -292,6 +324,11 @@ pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool
     if apply_ocr {
         apply_ocr_fn(temp_output.clone(), output_path.clone())?;
         std::fs::remove_file(&temp_output).context("Failed to remove temporary file")?;
+    }
+
+    if !is_debug() {
+        let suffix = if apply_ocr { " (with OCR)" } else { "" };
+        eprintln!("Converted {page_count} page(s) to safe PDF{suffix}");
     }
 
     Ok(())
@@ -335,7 +372,7 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
 
     // For each page, create a Page object and an Image XObject
     for (page_idx, page) in pages.iter().enumerate() {
-        eprintln!("Adding page {} to PDF...", page_idx + 1);
+        debugprint!("Adding page {} to PDF...", page_idx + 1);
 
         // Convert pixels to points (1 point = 1/72 inch)
         let width_pts = (page.width as f32) / DPI * 72.0;
@@ -440,7 +477,7 @@ fn write_pdf<W: Write>(writer: &mut W, pages: &[PageData]) -> Result<()> {
 
 /// Apply OCR to add text layer to PDF (platform-aware)
 pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
-    eprintln!("Applying OCR to PDF...");
+    debugprint!("Applying OCR to PDF...");
 
     // On macOS, try using PDFKit's saveTextFromOCROption first
     #[cfg(target_os = "macos")]
@@ -464,7 +501,7 @@ pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
 
     match output {
         Ok(result) if result.status.success() => {
-            eprintln!("OCR applied successfully");
+            debugprint!("OCR applied successfully");
             Ok(())
         }
         Ok(result) => {
@@ -489,7 +526,7 @@ pub fn apply_ocr_fn(input_pdf: String, output_pdf: String) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn apply_ocr_macos(input_pdf: &str, output_pdf: &str) -> Result<()> {
-    eprintln!("Using macOS PDFKit for OCR...");
+    debugprint!("Using macOS PDFKit for OCR...");
 
     let script_path = if let Ok(exe_path) = std::env::current_exe() {
         let mut path = exe_path.parent().unwrap().to_path_buf();
@@ -532,7 +569,7 @@ fn apply_ocr_macos(input_pdf: &str, output_pdf: &str) -> Result<()> {
         .context("Failed to execute Swift OCR script")?;
 
     if output.status.success() {
-        eprintln!("OCR applied successfully using macOS PDFKit");
+        debugprint!("OCR applied successfully using macOS PDFKit");
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
