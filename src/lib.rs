@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use util::replace_control_chars;
 
 pub mod cosign;
+pub mod registry;
 mod util;
 
 /// Global debug flag. When false (default), convert/upgrade flows emit a
