@@ -711,7 +711,7 @@ mod tests {
             "UNTRUSTED> \u{FFFD}\u{FFFD}y\n",
             "UNTRUSTED> ok line\n",
             "UNTRUSTED> \u{FFFD}[31mred\u{FFFD}[0m\n",
-            "UNTRUSTED> end",
+            "UNTRUSTED> end\n",
         );
 
         let reader = BufReader::new(std::io::Cursor::new(input.as_bytes()));
