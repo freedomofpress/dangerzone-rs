@@ -1,29 +1,32 @@
-// Signature verification tests, adapted from freedomofpress/dangerzone test_signatures.py
+//! Integration-style tests using fixtures captured from real cosign signed
+//! images. The unit-level tests for parsers, log-index handling, and digest
+//! plumbing live in the `mod tests` block of `src/cosign.rs`; this file
+//! exercises the full verify path against on-disk fixtures.
+//!
+//! The fixtures are arranged as:
+//!   - tests/assets/signatures/valid/<digest>.json     — must verify
+//!   - tests/assets/signatures/invalid/<digest>.json   — must NOT verify
+//!   - tests/assets/signatures/tampered/<digest>.json  — must NOT verify
+//!
+//! The filename's stem is the image digest the signature claims to cover,
+//! which means the fixtures also exercise the `docker-manifest-digest` ←→
+//! filename binding that the on-disk format relies on.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use dangerzone_rs::cosign::{verify_signatures, CosignSignature};
+
 const ASSETS_PATH: &str = "tests/assets";
 const TEST_PUBKEY_FILENAME: &str = "test.pub.key";
 
-fn test_pubkey_path() -> PathBuf {
-    Path::new(ASSETS_PATH).join(TEST_PUBKEY_FILENAME)
-}
-
 fn test_pubkey_pem() -> String {
-    fs::read_to_string(test_pubkey_path()).expect("Failed to read test public key")
+    fs::read_to_string(Path::new(ASSETS_PATH).join(TEST_PUBKEY_FILENAME))
+        .expect("Failed to read test public key")
 }
 
-fn valid_signatures_path() -> PathBuf {
-    Path::new(ASSETS_PATH).join("signatures").join("valid")
-}
-
-fn invalid_signatures_path() -> PathBuf {
-    Path::new(ASSETS_PATH).join("signatures").join("invalid")
-}
-
-fn tampered_signatures_path() -> PathBuf {
-    Path::new(ASSETS_PATH).join("signatures").join("tampered")
+fn fixture_dir(name: &str) -> PathBuf {
+    Path::new(ASSETS_PATH).join("signatures").join(name)
 }
 
 fn find_signature_files(dir: &Path) -> Vec<PathBuf> {
@@ -38,182 +41,143 @@ fn find_signature_files(dir: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    files.sort();
     files
 }
 
-fn load_signature(path: &Path) -> Vec<dangerzone_rs::cosign::CosignSignature> {
+fn load_signature(path: &Path) -> Vec<CosignSignature> {
     let data = fs::read_to_string(path).expect("Failed to read signature file");
     serde_json::from_str(&data).expect("Failed to parse signature JSON")
 }
 
+/// Every fixture in `valid/` must verify against the test public key, and
+/// the digest encoded in the filename must be the digest the signature
+/// payload covers. If either of these regresses the test fails.
 #[test]
-fn test_signature_assets_exist() {
-    assert!(test_pubkey_path().exists(), "Missing test pubkey");
-    assert!(valid_signatures_path().exists(), "Missing valid dir");
-    assert!(invalid_signatures_path().exists(), "Missing invalid dir");
-    assert!(tampered_signatures_path().exists(), "Missing tampered dir");
-
-    assert!(!find_signature_files(&valid_signatures_path()).is_empty());
-    assert!(!find_signature_files(&invalid_signatures_path()).is_empty());
-    assert!(!find_signature_files(&tampered_signatures_path()).is_empty());
-}
-
-#[test]
-fn test_public_key_format() {
-    let content = fs::read_to_string(test_pubkey_path()).expect("Failed to read pubkey");
-    assert!(content.starts_with("-----BEGIN PUBLIC KEY-----"));
-    assert!(content.trim().ends_with("-----END PUBLIC KEY-----"));
-}
-
-#[test]
-fn test_signature_file_count() {
-    let valid_count = find_signature_files(&valid_signatures_path()).len();
-    let invalid_count = find_signature_files(&invalid_signatures_path()).len();
-    let tampered_count = find_signature_files(&tampered_signatures_path()).len();
-
-    assert_eq!(valid_count, 3, "Expected 3 valid signature files");
-    assert_eq!(invalid_count, 4, "Expected 4 invalid signature files");
-    assert_eq!(tampered_count, 2, "Expected 2 tampered signature files");
-}
-
-#[test]
-fn test_valid_signatures_verify() {
+fn valid_fixtures_all_verify() {
     let pubkey_pem = test_pubkey_pem();
-    let files = find_signature_files(&valid_signatures_path());
-    assert!(!files.is_empty(), "No valid signature files found");
+    let files = find_signature_files(&fixture_dir("valid"));
+    assert!(!files.is_empty(), "No valid signature fixtures present");
 
     for file in &files {
         let sigs = load_signature(file);
         assert!(!sigs.is_empty(), "Empty signature file: {:?}", file);
         let digest = file.file_stem().unwrap().to_string_lossy();
-        let result = dangerzone_rs::cosign::verify_signatures(&sigs, &digest, &pubkey_pem);
-        assert!(
-            result.is_ok(),
-            "Valid signature failed: {:?}: {}",
-            file,
-            result.unwrap_err()
-        );
+        verify_signatures(&sigs, &digest, &pubkey_pem)
+            .unwrap_or_else(|e| panic!("Valid fixture {file:?} failed to verify: {e}"));
     }
 }
 
+/// Format-malformed fixtures in `invalid/` must FAIL to verify.
+///
+/// The fixture suite contains two distinct categories of "invalid":
+///   1. Format-malformed fixtures (non-base64 signature bytes, non-base64
+///      payload, etc.) — these MUST be rejected by an offline verifier.
+///   2. Fixtures with a valid offline signature but invalid Rekor metadata
+///      (e.g. tampered `SignedEntryTimestamp`, malformed bundle body).
+///      These are detectable only by an *online* Rekor-backed verifier.
+///      Since this codebase deliberately performs offline verification, we
+///      do not require the offline verifier to reject them. They still
+///      provide value: the rollback-detection / log-index code paths
+///      consume them.
+///
+/// The previous version of this test used `.any(...)`, which would silently
+/// accept a regression that made a malformed-format fixture verify. We now
+/// enumerate the malformed-format files explicitly and assert each fails.
 #[test]
-fn test_invalid_signatures_fail() {
+fn malformed_format_invalid_fixtures_fail() {
     let pubkey_pem = test_pubkey_pem();
-    let files = find_signature_files(&invalid_signatures_path());
-    assert!(!files.is_empty(), "No invalid signature files found");
+    let files = find_signature_files(&fixture_dir("invalid"));
+    assert!(!files.is_empty(), "No invalid signature fixtures present");
 
-    assert!(
-        files.iter().any(|f| {
-            let sigs = load_signature(f);
-            let digest = f.file_stem().unwrap().to_string_lossy();
-            dangerzone_rs::cosign::verify_signatures(&sigs, &digest, &pubkey_pem).is_err()
-        }),
-        "At least one invalid signature file should fail verification"
-    );
+    // Stems of fixtures whose *format* (not just Rekor metadata) is broken.
+    // These must all fail offline verification.
+    let format_broken: &[&str] = &[
+        // Base64Signature is the literal text "Invalid base64 signature".
+        "19e8eacd75879d05f6621c2ea8dd955e68ee3e07b41b9d53f4c8cc9929a68a67",
+        // Payload is the literal text "Invalid base64 payload".
+        "220b52200e3e47b1b42010667fcaa9338681e64dd3e34a34873866cb051d694e",
+    ];
+
+    let mut checked = 0;
+    for stem in format_broken {
+        let file = files
+            .iter()
+            .find(|f| f.file_stem().and_then(|s| s.to_str()) == Some(stem))
+            .unwrap_or_else(|| panic!("missing fixture for stem {stem}"));
+        let sigs = load_signature(file);
+        let digest = file.file_stem().unwrap().to_string_lossy();
+        let result = verify_signatures(&sigs, &digest, &pubkey_pem);
+        assert!(
+            result.is_err(),
+            "Format-broken fixture {file:?} unexpectedly verified — \
+             this would be a security regression"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, format_broken.len());
 }
 
+/// Tampered fixtures must all fail verification.
 #[test]
-fn test_tampered_signatures_fail() {
+fn tampered_fixtures_all_fail() {
     let pubkey_pem = test_pubkey_pem();
-    let files = find_signature_files(&tampered_signatures_path());
-    assert!(!files.is_empty(), "No tampered signature files found");
+    let files = find_signature_files(&fixture_dir("tampered"));
+    assert!(!files.is_empty(), "No tampered signature fixtures present");
 
     for file in &files {
         let sigs = load_signature(file);
         let digest = file.file_stem().unwrap().to_string_lossy();
-        let result = dangerzone_rs::cosign::verify_signatures(&sigs, &digest, &pubkey_pem);
+        let result = verify_signatures(&sigs, &digest, &pubkey_pem);
         assert!(
             result.is_err(),
-            "Tampered signature should fail: {:?}",
-            file
+            "Tampered fixture {file:?} verified successfully — security regression"
         );
     }
 }
 
+/// A valid fixture, verified against the *wrong* digest, must still fail.
+/// This pins the `payload.docker-manifest-digest` ↔ caller-provided digest
+/// binding so a regression that ever skipped that check would be caught.
 #[test]
-fn test_get_log_index_from_signatures() {
-    use base64::Engine;
-    use dangerzone_rs::cosign::CosignSignature;
-
-    let sig_with = CosignSignature {
-        base64_signature: "AAAA".into(),
-        payload: base64::engine::general_purpose::STANDARD.encode(b"{}"),
-        cert: None,
-        chain: None,
-        bundle: Some(serde_json::json!({"Payload": {"logIndex": 12345}})),
-        rfc3161_timestamp: None,
-    };
-    assert_eq!(
-        dangerzone_rs::cosign::get_log_index_from_signatures(&[sig_with]),
-        12345
+fn valid_fixture_fails_with_wrong_digest() {
+    let pubkey_pem = test_pubkey_pem();
+    let files = find_signature_files(&fixture_dir("valid"));
+    let file = files.first().expect("need at least one valid fixture");
+    let sigs = load_signature(file);
+    let wrong_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+    let err = verify_signatures(&sigs, wrong_digest, &pubkey_pem)
+        .expect_err("verification with wrong digest must fail");
+    // Walk the anyhow error chain looking for the digest-mismatch cause.
+    let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+    assert!(
+        chain.iter().any(|s| s.contains("Digest mismatch")),
+        "expected digest-mismatch in error chain, got: {chain:?}"
     );
 }
 
+/// A valid fixture, verified against the *wrong* public key, must fail with
+/// a cryptographic error (not, say, a parse error that's silently treated
+/// as success).
 #[test]
-fn test_get_log_index_from_empty_signatures() {
-    assert_eq!(
-        dangerzone_rs::cosign::get_log_index_from_signatures(&[]),
-        0
-    );
-}
-
-#[test]
-fn test_get_log_index_from_malformed() {
-    use base64::Engine;
-    use dangerzone_rs::cosign::CosignSignature;
-
-    let sig = CosignSignature {
-        base64_signature: "AAAA".into(),
-        payload: base64::engine::general_purpose::STANDARD.encode(b"{}"),
-        cert: None,
-        chain: None,
-        bundle: Some(serde_json::json!({"Payload": {"logIndex": "not-a-number"}})),
-        rfc3161_timestamp: None,
+fn valid_fixture_fails_with_wrong_key() {
+    use p256::{
+        ecdsa::SigningKey,
+        pkcs8::{EncodePublicKey, LineEnding},
     };
-    assert_eq!(
-        dangerzone_rs::cosign::get_log_index_from_signatures(&[sig]),
-        0
-    );
-}
+    use rand_core::OsRng;
 
-#[test]
-fn test_get_log_index_from_missing_bundle() {
-    use base64::Engine;
-    use dangerzone_rs::cosign::CosignSignature;
+    let other_pem = SigningKey::random(&mut OsRng)
+        .verifying_key()
+        .to_public_key_pem(LineEnding::LF)
+        .unwrap();
 
-    let sig = CosignSignature {
-        base64_signature: "AAAA".into(),
-        payload: base64::engine::general_purpose::STANDARD.encode(b"{}"),
-        cert: None,
-        chain: None,
-        bundle: None,
-        rfc3161_timestamp: None,
-    };
-    assert_eq!(
-        dangerzone_rs::cosign::get_log_index_from_signatures(&[sig]),
-        0
-    );
-}
-
-#[test]
-fn test_signature_payload_bytes() {
-    use base64::Engine;
-    use dangerzone_rs::cosign::CosignSignature;
-
-    let sig = CosignSignature {
-        base64_signature: "AAAA".into(),
-        payload: base64::engine::general_purpose::STANDARD.encode(
-            br#"{"critical":{"image":{"docker-manifest-digest":"sha256:abc123"}}}"#,
-        ),
-        cert: None,
-        chain: None,
-        bundle: None,
-        rfc3161_timestamp: None,
-    };
-    let bytes = sig.payload_bytes().unwrap();
-    let decoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        decoded["critical"]["image"]["docker-manifest-digest"],
-        "sha256:abc123"
+    let files = find_signature_files(&fixture_dir("valid"));
+    let file = files.first().expect("need at least one valid fixture");
+    let sigs = load_signature(file);
+    let digest = file.file_stem().unwrap().to_string_lossy();
+    assert!(
+        verify_signatures(&sigs, &digest, &other_pem).is_err(),
+        "verification with wrong key must fail"
     );
 }
