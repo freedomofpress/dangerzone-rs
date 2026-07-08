@@ -73,52 +73,8 @@ impl OcrPage {
 /// the different OCR backends will follow. This way we keep our OCR
 /// implementation modular.
 pub(crate) trait OcrBackend {
-    /// Detect words on a single page
-    ///
-    /// `pixels` must contain `width * height * 3` bytes in RGB order.
-    fn ocr_page(&self, pixels: &[u8], width: u16, height: u16) -> Result<OcrPage>;
-
     /// Run OCR for multiple pages.
-    fn ocr_pages(&self, pages: &[PageData]) -> Result<Vec<OcrPage>> {
-        pages
-            .iter()
-            .map(|page| self.ocr_page(&page.pixels, page.width, page.height))
-            .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct FakeOcrBackend;
-
-    impl OcrBackend for FakeOcrBackend {
-        fn ocr_page(&self, _pixels: &[u8], width: u16, height: u16) -> Result<OcrPage> {
-            Ok(OcrPage::new(vec![OcrWord {
-                text: format!("{width}x{height}"),
-                vbox: OcrVBox {
-                    x: 1,
-                    y: 2,
-                    w: 3,
-                    h: 4,
-                },
-            }]))
-        }
-    }
-
-    #[test]
-    fn ocr_pages_runs_backend_for_each_page() -> Result<()> {
-        let pages = vec![
-            PageData::new(10, 20, vec![255; 10 * 20 * 3]),
-            PageData::new(30, 40, vec![255; 30 * 40 * 3]),
-        ];
-
-        let result = FakeOcrBackend.ocr_pages(&pages)?;
-
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].words[0].text, "10x20");
-        assert_eq!(result[1].words[0].text, "30x40");
-        Ok(())
-    }
+    /// Each back-end can defer this method call to it's own internal implementation
+    /// to handle OCR on different pages (e.g parallel vs sequential).
+    fn ocr_pages(&self, pages: &[PageData]) -> Result<Vec<OcrPage>>;
 }

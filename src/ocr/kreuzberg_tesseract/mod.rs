@@ -2,20 +2,31 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use kreuzberg_tesseract::{Pix, ResultIterator, TesseractAPI};
+use rayon::{prelude::*, ThreadPoolBuilder};
 
-use crate::DPI;
+use crate::{PageData, DPI};
 
 use super::{OcrBackend, OcrPage, OcrVBox, OcrWord};
 
-/// OCR backend powered by the `kreuzberg-tesseract` used for Linux
-pub(crate) struct KreuzbergTesseractOcr {
+/// OCR backend powered by the `kreuzberg-tesseract` used for Linux.
+pub(crate) struct KreuzbergTesseractOcr;
+
+/// Since the `KreuzbergTesseractOcr` backend will be always called
+/// in parallel, we need a seperate type representing the worker.
+/// This worker will be initialized in the Rayon workers, and will
+/// contain the logic to do OCR work for a page.
+struct KreuzbergTesseractOcrWorker {
     api: TesseractAPI,
 }
 
-impl KreuzbergTesseractOcr {
-    pub(crate) fn new() -> Result<Self> {
+impl KreuzbergTesseractOcrWorker {
+    /// Create new instance of OCR worker. This worker will
+    /// contain the logic to init the Tesseract API instance + doing
+    /// OCR for a page. Since each Rayon worker will have one
+    /// OCR-worker this is the logical structure.
+    fn new() -> Result<Self> {
         let api = TesseractAPI::new().context("Failed to create Tesseract API")?;
         let tessdata_dir = Self::tessdata_dir().context("Failed to find Tesseract tessdata")?;
 
@@ -71,9 +82,7 @@ impl KreuzbergTesseractOcr {
             path.join("tessdata")
         }
     }
-}
 
-impl OcrBackend for KreuzbergTesseractOcr {
     fn ocr_page(&self, pixels: &[u8], width: u16, height: u16) -> Result<OcrPage> {
         // Pass container's bytes directly using Leptonica's Pix wrapper
         // exposed by `kreuzberg-tesseract`.
@@ -108,6 +117,67 @@ impl OcrBackend for KreuzbergTesseractOcr {
             .context("Failed to get Tesseract result iterator")?;
 
         Ok(OcrPage::new(extract_ocr_words(&iterator)?))
+    }
+}
+
+impl KreuzbergTesseractOcr {
+    /// Create instance of `KreuzbergTesseractOcr`.
+    /// This type only contains methods to call logic for
+    /// parallel OCR.
+    pub(crate) fn new() -> Self {
+        Self
+    }
+
+    /// Amount of max workers.
+    /// The amount of workers is half the amount of available CPU cores to avoid overloading the
+    /// CPU.
+    fn max_workers() -> usize {
+        std::thread::available_parallelism()
+            .map(|cpus| std::cmp::max(1, cpus.get() / 2))
+            .unwrap_or(1)
+    }
+
+    /// Handle OCR for all pages in parallel.
+    /// This method creates a pool of Rayon workers, each Rayon-worker will initialize it's own
+    /// instance of a `KreuzbergTesseractWorker` containing a Tesseract object.
+    fn ocr_pages_parallel(&self, pages: &[PageData]) -> Result<Vec<OcrPage>> {
+        // Create pool of Rayon workers.
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(Self::max_workers())
+            .build()
+            .context("Failed to create pool of Rayon workers for parallel OCR.")?;
+
+        // Set previous initiated pool to run closure.
+        pool.install(|| {
+            pages
+                .par_iter() // Convert iter into Rayon parallel iterator.
+                .map_init(
+                    // The `init` argument for `map_init`.
+                    // Each worker wil init its own instance of `KreuzbergTesseractWorker`
+                    // responsible for performing the OCR on the allocated pages.
+                    KreuzbergTesseractOcrWorker::new,
+                    // `ocr_worker` is the result of our previous `map_init` call.
+                    // `page` is one item from the `pages.par_item` allocted to current worker.
+                    |ocr_worker, page| -> Result<OcrPage> {
+                        // Get OCR-worker as reference so we do not move it out
+                        // of the local Rayon-worker.
+                        let worker = ocr_worker.as_ref().map_err(|err| {
+                            anyhow!("Failed to init KreuzbergTesseractWorker: {err}")
+                        })?;
+
+                        worker
+                            .ocr_page(&page.pixels, page.width, page.height)
+                            .with_context(|| "Failed to run KreuzbergTesseractOCR.".to_string())
+                    },
+                )
+                .collect::<Result<Vec<OcrPage>>>()
+        })
+    }
+}
+
+impl OcrBackend for KreuzbergTesseractOcr {
+    fn ocr_pages(&self, pages: &[PageData]) -> Result<Vec<OcrPage>> {
+        self.ocr_pages_parallel(pages)
     }
 }
 
