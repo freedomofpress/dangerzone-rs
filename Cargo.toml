@@ -24,8 +24,8 @@ flate2 = "1.0"
 pyo3 = { version = "0.26", features = ["extension-module", "abi3-py312"], optional = true }
 unicode-general-category = "1.1.0"
 kreuzberg-tesseract = { version = "4.9", default-features = false, features = ["static-linking"] }
+rayon = "1.8"
 
 [dev-dependencies]
 tempfile = "3.8"
 walkdir = "2.4"
-rayon = "1.8"
