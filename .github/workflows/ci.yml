@@ -42,7 +42,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y podman poppler-utils
-    
+
     - name: Cache cargo
       uses: actions/cache@v4
       with:
@@ -60,8 +60,36 @@ jobs:
     - name: Run clippy
       run: cargo clippy --all-targets -- -D warnings
     
+  build-and-test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
     - name: Build project
       run: cargo build --release
 
     - name: Run tests
       run: cargo test --all-targets
+      env:
+        TESSDATA_PREFIX: ${{ github.workspace }}/target/kreuzberg-tesseract-cache
