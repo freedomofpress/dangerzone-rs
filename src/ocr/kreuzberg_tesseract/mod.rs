@@ -216,3 +216,14 @@ fn extract_ocr_words(iterator: &ResultIterator) -> Result<Vec<OcrWord>> {
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::KreuzbergTesseractOcr;
+
+    #[test]
+    fn initializes_with_tesseract_data() {
+        KreuzbergTesseractOcr::new()
+            .expect("Tesseract data should be available on every supported platform");
+    }
+}
