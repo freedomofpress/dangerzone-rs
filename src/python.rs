@@ -12,7 +12,7 @@ use crate::{
 use pyo3::prelude::*;
 
 /// Python-compatible wrapper for PageData
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PageData {
     #[pyo3(get)]
