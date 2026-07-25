@@ -1,4 +1,4 @@
-//! OCR backend powered by the `kreuzberg-tesseract` used for Linux
+//! OCR backend powered by `kreuzberg-tesseract`.
 
 use std::path::PathBuf;
 
@@ -10,7 +10,7 @@ use crate::{PageData, DPI};
 
 use super::{OcrBackend, OcrPage, OcrVBox, OcrWord};
 
-/// OCR backend powered by the `kreuzberg-tesseract` used for Linux.
+/// OCR backend powered by `kreuzberg-tesseract`.
 pub(crate) struct KreuzbergTesseractOcr;
 
 /// Since the `KreuzbergTesseractOcr` backend will be always called
@@ -59,15 +59,52 @@ impl KreuzbergTesseractOcrWorker {
             candidates.push(Self::as_tessdata_dir(PathBuf::from(path)));
         }
 
-        // Common Linux package locations for Tesseract 5 and older distro
-        // layouts. These are used when tessdata was installed system-wide.
-        candidates.push(PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"));
-        candidates.push(PathBuf::from("/usr/share/tesseract-ocr/tessdata"));
+        #[cfg(target_os = "linux")]
+        {
+            // Common package locations for Tesseract 5 and older distro
+            // layouts. These are used when tessdata was installed system-wide.
+            candidates.push(PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"));
+            candidates.push(PathBuf::from("/usr/share/tesseract-ocr/tessdata"));
 
-        // Fallback to the Linux cache directory used by `kreuzberg-tesseract`
-        // when its bundled tessdata was downloaded during build.
-        if let Ok(home) = std::env::var("HOME") {
-            candidates.push(PathBuf::from(home).join(".kreuzberg-tesseract/tessdata"));
+            // Cache directory used by `kreuzberg-tesseract`.
+            if let Some(home) = std::env::var_os("HOME") {
+                candidates.push(PathBuf::from(home).join(".kreuzberg-tesseract/tessdata"));
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(home) = std::env::var_os("HOME") {
+                candidates.push(
+                    PathBuf::from(home)
+                        .join("Library/Application Support/kreuzberg-tesseract/tessdata"),
+                );
+            }
+
+            // Homebrew's default prefixes on Apple Silicon and Intel Macs.
+            candidates.push(PathBuf::from("/opt/homebrew/share/tessdata"));
+            candidates.push(PathBuf::from("/usr/local/share/tessdata"));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Default cache used by kreuzberg-tesseract's Windows build.
+            candidates.push(PathBuf::from(r"C:\tess\tessdata"));
+
+            if let Some(app_data) = std::env::var_os("APPDATA") {
+                candidates.push(
+                    PathBuf::from(app_data)
+                        .join("kreuzberg-tesseract")
+                        .join("tessdata"),
+                );
+            }
+
+            // Standard locations used by Windows Tesseract installers.
+            for program_files in ["ProgramFiles", "ProgramFiles(x86)"] {
+                if let Some(path) = std::env::var_os(program_files) {
+                    candidates.push(PathBuf::from(path).join("Tesseract-OCR/tessdata"));
+                }
+            }
         }
 
         candidates.into_iter().find(|path| path.exists())
