@@ -44,13 +44,13 @@ impl KreuzbergTesseractOcrWorker {
     /// `TESSDATA_PREFIX` has priority when set. Otherwise we use the tessdata
     /// bundled by `kreuzberg-tesseract`.
     fn tessdata_dir() -> Option<PathBuf> {
+        let mut candidates = Vec::new();
+
         // Honor the standard Tesseract override first. Callers may point this
         // either at the tessdata directory itself or at its parent.
-        if let Ok(path) = std::env::var("TESSDATA_PREFIX") {
-            return Some(Self::as_tessdata_dir(PathBuf::from(path)));
+        if let Some(path) = std::env::var_os("TESSDATA_PREFIX") {
+            candidates.push(Self::as_tessdata_dir(PathBuf::from(path)));
         }
-
-        let mut candidates = Vec::new();
 
         // `kreuzberg-tesseract`'s build script downloads bundled English
         // traineddata under {TESSDATA_PREFIX_BUNDLED}/tessdata and exports the
@@ -107,7 +107,7 @@ impl KreuzbergTesseractOcrWorker {
             }
         }
 
-        candidates.into_iter().find(|path| path.exists())
+        candidates.into_iter().find(|path| path.is_dir())
     }
 
     // TESSDATA_PREFIX can either mean the tessdata directory itself or the parent prefix. This is
