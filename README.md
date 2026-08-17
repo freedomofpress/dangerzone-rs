@@ -1,6 +1,6 @@
 # dangerzone.rs
 
-[![CI](https://github.com/almet/dangerzone-rs/workflows/CI/badge.svg)](https://github.com/almet/dangerzone-rs/actions)
+[![CI](https://github.com/freedomofpress/dangerzone-rs/workflows/CI/badge.svg)](https://github.com/freedomofpress/dangerzone-rs/actions)
 
 > [!WARNING]
 > This project is experimental and should not be used in production.
