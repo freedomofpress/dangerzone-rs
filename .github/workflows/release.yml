@@ -5,16 +5,25 @@ on:
     tags:
       - 'v*'
 
+permissions: {}
+
+# Never cancel a release that is being published.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # Release builds don't use a cache, so that a poisoned cache from another
+  # workflow can't end up in the published binaries.
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     permissions:
-      contents: write
+      contents: read # to check out the code
     strategy:
       fail-fast: false
       matrix:
@@ -50,50 +59,77 @@ jobs:
             artifact_name: dangerzone-rs.exe
             asset_name: dangerzone-rs-windows-x86_64.exe
 
+    env:
+      TARGET: ${{ matrix.target }}
+      ARTIFACT_NAME: ${{ matrix.artifact_name }}
+      ASSET_NAME: ${{ matrix.asset_name }}
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --target "$TARGET"
+          rustup default stable
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
+        run: cargo install cross --locked --version 0.2.5
 
       - name: Build binary (using cross)
         if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --locked --release --target "$TARGET"
 
       - name: Build binary (using cargo)
         if: ${{ !matrix.use_cross }}
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target "$TARGET"
 
       - name: Strip binary (Linux and macOS only)
         if: ${{ !matrix.use_cross && runner.os != 'Windows' }}
-        run: |
-          strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        run: strip "target/$TARGET/release/$ARTIFACT_NAME"
 
       - name: Rename binary
         shell: bash
         run: |
           mkdir -p release
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} release/${{ matrix.asset_name }}
+          cp "target/$TARGET/release/$ARTIFACT_NAME" "release/$ASSET_NAME"
 
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v2
+      - name: Upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          files: release/${{ matrix.asset_name }}
+          name: ${{ matrix.asset_name }}
+          path: release/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  # Only this job can write to the repository, and it doesn't build anything.
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to create the release and upload its assets
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Compute checksums
+        working-directory: release
+        run: sha256sum -- * > SHA256SUMS
+
+      # Create the release unless it exists already, e.g. as a draft.
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "$TAG"
+          gh release upload "$TAG" release/* --clobber
