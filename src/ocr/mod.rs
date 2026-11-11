@@ -4,9 +4,9 @@ use anyhow::Result;
 
 use crate::PageData;
 
-pub(crate) mod kreuzberg_tesseract;
 pub(crate) mod pdf_renderer;
-pub(crate) use self::kreuzberg_tesseract::KreuzbergTesseractOcr;
+pub(crate) mod xberg_tesseract;
+pub(crate) use self::xberg_tesseract::XbergTesseractOcr;
 
 /// Object holding coordinates and size data of OCR object
 #[derive(Clone, Copy, Debug)]
