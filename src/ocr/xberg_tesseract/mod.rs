@@ -118,6 +118,11 @@ impl XbergTesseractOcrWorker {
             .to_grayscale()
             .map_err(tesseract_error("convert the OCR image to grayscale"))?;
 
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "DPI is a small constant that fits in an i32"
+        )]
         let dpi = DPI as i32;
 
         // Store the container-rendered resolution on the Pix as image metadata

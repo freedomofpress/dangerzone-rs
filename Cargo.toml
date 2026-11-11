@@ -33,3 +33,81 @@ thiserror = "2"
 tempfile = "3.8"
 testresult = "0.4"
 walkdir = "2.4"
+
+# Lints are errors, so that they fail local builds and not only CI. We deny
+# lint groups and specific lints, instead of all `warnings`, so that new lints
+# in future toolchains don't break builds from source (e.g., `cargo install`).
+#
+# Inspired by the lints of rustls, Arti, sudo-rs, ntpd-rs, and wasmtime.
+[lints.rust]
+# Default-on lints, turned into errors.
+unused = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+let_underscore = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+unexpected_cfgs = "deny"
+# Opt-in lints.
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+noop_method_call = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unreachable_pub = "deny"
+unused_extern_crates = "deny"
+unused_import_braces = "deny"
+unused_lifetimes = "deny"
+unused_macro_rules = "deny"
+unused_qualifications = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+bare_urls = "deny"
+invalid_codeblock_attributes = "deny"
+invalid_html_tags = "deny"
+invalid_rust_codeblocks = "deny"
+
+[lints.clippy]
+# All default clippy lints, turned into errors.
+all = { level = "deny", priority = -1 }
+# Leftover debugging and unfinished code.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+# stdout may carry data (e.g., a PDF), so we don't print to it by accident.
+print_stdout = "deny"
+# Panics. Prefer returning errors.
+unwrap_used = "deny"
+unwrap_in_result = "deny"
+fallible_impl_from = "deny"
+panic_in_result_fn = "deny"
+# Lossy casts, which can silently corrupt sizes and offsets.
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+checked_conversions = "deny"
+# Slicing a string at a non-char boundary panics.
+string_slice = "deny"
+# Unsafe code, in case we ever allow it.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+# Other bug-prone patterns.
+debug_assert_with_mut_call = "deny"
+large_stack_arrays = "deny"
+mem_forget = "deny"
+filetype_is_file = "deny"
+verbose_file_reads = "deny"
+# Every `#[allow]` must explain itself.
+allow_attributes_without_reason = "deny"
+# Code quality.
+cloned_instead_of_copied = "deny"
+implicit_clone = "deny"
+manual_let_else = "deny"
+needless_pass_by_ref_mut = "deny"
+needless_pass_by_value = "deny"
+redundant_clone = "deny"
+semicolon_if_nothing_returned = "deny"
+unnecessary_wraps = "deny"

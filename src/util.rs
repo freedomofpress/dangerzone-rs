@@ -114,6 +114,10 @@ impl<T: AsRef<OsStr>> fmt::Debug for Untrusted<T> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "tests assert, and return errors with `?` instead of unwrapping"
+)]
 mod tests {
     use std::io::Write;
     use std::path::PathBuf;

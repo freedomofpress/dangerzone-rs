@@ -631,6 +631,10 @@ fn build_pdf(pages: &[PageData], ocr_pages: Option<&[ocr::OcrPage]>) -> Vec<u8> 
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "tests assert, and return errors with `?` instead of unwrapping"
+)]
 mod tests {
     use std::fs;
 
