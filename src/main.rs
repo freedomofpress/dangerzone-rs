@@ -1,9 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use dangerzone_rs::convert_document;
-use util::replace_control_chars;
-
-mod util;
+use dangerzone_rs::{convert_document, replace_control_chars};
 
 /// A simple Dangerzone CLI implementation in Rust
 #[derive(Parser, Debug)]

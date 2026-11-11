@@ -6,12 +6,13 @@ use ocr::OcrBackend;
 use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
-use util::replace_control_chars;
 
 use crate::ocr::KreuzbergTesseractOcr;
 
 mod ocr;
 mod util;
+
+pub use util::{replace_control_chars, Untrusted};
 
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
 pub const INT_BYTES: usize = 2;
@@ -139,8 +140,8 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
             break;
         }
 
-        let s = String::from_utf8_lossy(&line_buf);
-        let mut sanitized: String = replace_control_chars(&s, true);
+        let line = Untrusted::new(String::from_utf8_lossy(&line_buf).into_owned());
+        let mut sanitized = line.sanitized(true);
         if !sanitized.ends_with('\n') {
             sanitized.push('\n');
         }
