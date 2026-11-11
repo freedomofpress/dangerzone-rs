@@ -507,11 +507,6 @@ pub fn apply_ocr_fn(input_path: String, output_path: String) -> Result<()> {
         .context("Failed to convert pixels to OCR PDF")
 }
 
-/// Python bindings module
-/// Re-exports from the python module to make them available to PyO3
-#[cfg(feature = "python")]
-pub mod python;
-
 #[cfg(test)]
 mod tests {
     use super::*;

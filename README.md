@@ -48,38 +48,7 @@ dangerzone-rs --input unsafe.pdf --output safe.pdf --ocr
 OCR uses the integrated Tesseract backend and writes the text layer directly
 into the generated safe PDF.
 
-### Python Library
-
-Use dangerzone-rs as a Python library to programmatically convert documents.
-
-#### Installation
-
-As this is not published to PyPI, here is how to install it locally:
-
-```bash
-uv venv
-source .venv/bin/activate
-uv tool install maturin
-maturin develop --features python
-```
-
-#### Basic Usage
-
-Run the demos like this:
-
-```bash
-python demo/demo.py
-```
-
-#### Requirements
-
-- **Podman**: The container runtime (required for document conversion)
-- **Dangerzone container image**:
-  ```bash
-  podman pull ghcr.io/freedomofpress/dangerzone/v1
-  ```
-
-## Prerequisites (CLI)
+## Prerequisites
 
 - Rust (for building the binary from source)
 - Podman
