@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use crate::error::ErrorContext;
 use crate::ocr::XbergTesseractOcr;
 
 mod error;
@@ -209,6 +210,7 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
             .by_ref()
             .take(MAX_SANITIZED_CHUNK_BYTES)
             .read_until(b'\n', &mut line_buf)
+            .context("reading the container's stderr")
             .map_err(Error::ContainerIo)?;
         if n == 0 {
             break;
@@ -226,8 +228,9 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
         };
 
         out.write_all(sanitized_untrusted_prefix.as_bytes())
+            .context("writing to stderr")
             .map_err(Error::Log)?;
-        out.flush().map_err(Error::Log)?;
+        out.flush().context("flushing stderr").map_err(Error::Log)?;
     }
 
     Ok(())
@@ -316,7 +319,10 @@ pub fn convert_doc_to_pixels(input: impl Into<Untrusted<PathBuf>>) -> Result<Vec
     drop(stdin);
 
     // Read the output from the container
-    let output = child.wait_with_output().map_err(Error::ContainerIo)?;
+    let output = child
+        .wait_with_output()
+        .context("waiting for the container to finish")
+        .map_err(Error::ContainerIo)?;
 
     // Read stderr from the container
     match stderr_thread.join() {
@@ -347,7 +353,9 @@ pub fn convert_doc_to_pixels(input: impl Into<Untrusted<PathBuf>>) -> Result<Vec
             _ => Error::Conversion(output.status),
         });
     }
-    write_result.map_err(Error::ContainerIo)?;
+    write_result
+        .context("sending the document to the container")
+        .map_err(Error::ContainerIo)?;
 
     eprintln!("Document converted to pixels successfully");
     Ok(output.stdout)
@@ -397,8 +405,13 @@ fn write_pages_to_pdf_file(
         path: output.clone(),
         source,
     };
-    let mut file = output.create().map_err(output_error)?;
-    file.write_all(&pdf_data).map_err(output_error)
+    let mut file = output
+        .create()
+        .context("creating the safe PDF file")
+        .map_err(output_error)?;
+    file.write_all(&pdf_data)
+        .context("writing into the safe PDF")
+        .map_err(output_error)
 }
 
 /// Compress data with zlib, for a PDF `/FlateDecode` stream.
