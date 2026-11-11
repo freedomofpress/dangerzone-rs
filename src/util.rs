@@ -1,10 +1,27 @@
 //! General purpose helper methods used in the application
 
-/// Remove control characters from string. Protects a terminal emulator
-/// from obscure control characters
+use std::ffi::OsStr;
+use std::fmt;
+use std::fs::{self, File};
+use std::io;
+use std::path::{Path, PathBuf};
+
+/// Replace characters that are unsafe to print in a terminal with U+FFFD (�).
 ///
-/// Control characters are replaced by � U+FFFD Replacement Character
-pub(crate) fn replace_control_chars(s: &str, keep_newlines: bool) -> String {
+/// This covers control characters such as ANSI escape codes, invisible
+/// formatting characters, private use and unassigned code points, and line
+/// and paragraph separators. Use it on any untrusted text, such as file names
+/// or the container's output, before printing it.
+///
+/// `\n` is kept if `keep_newlines` is true.
+///
+/// ```
+/// use dangerzone_rs::replace_control_chars;
+///
+/// assert_eq!(replace_control_chars("\x1b[31mred\n", false), "\u{FFFD}[31mred\u{FFFD}");
+/// assert_eq!(replace_control_chars("\x1b[31mred\n", true), "\u{FFFD}[31mred\n");
+/// ```
+pub fn replace_control_chars(s: &str, keep_newlines: bool) -> String {
     /// Return whether Unicode character is safe to print in a terminal
     /// emulator, based on its General Category
     fn is_safe(c: char) -> bool {
@@ -30,9 +47,80 @@ pub(crate) fn replace_control_chars(s: &str, keep_newlines: bool) -> String {
         .collect()
 }
 
+/// A value that may be controlled by an attacker, such as a document's name
+/// or the container's output.
+///
+/// Wrap such values as soon as they enter the program. Printing it with `{}`
+/// or `{:?}` passes it through [`replace_control_chars`], without keeping
+/// newlines, so it is safe to show in a terminal. Use
+/// [`sanitized`](Self::sanitized) to keep newlines.
+///
+/// The original value can't be taken out. Instead, `Untrusted` has methods
+/// for the few things that need it, e.g. [`read`](Self::read) to read the
+/// file at an untrusted path.
+///
+/// ```
+/// use std::path::PathBuf;
+/// use dangerzone_rs::Untrusted;
+///
+/// let path = Untrusted::new(PathBuf::from("\x1b[31mred\n.pdf"));
+/// assert_eq!(path.to_string(), "\u{FFFD}[31mred\u{FFFD}.pdf");
+/// ```
+#[derive(Clone, Copy)]
+pub struct Untrusted<T>(T);
+
+impl<T> Untrusted<T> {
+    /// Wrap an attacker-controlled value.
+    pub fn new(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<P: Into<PathBuf>> From<P> for Untrusted<PathBuf> {
+    fn from(path: P) -> Self {
+        Self(path.into())
+    }
+}
+
+impl<P: AsRef<Path>> Untrusted<P> {
+    /// Read the whole file at this path.
+    pub fn read(&self) -> io::Result<Vec<u8>> {
+        fs::read(&self.0)
+    }
+
+    /// Create the file at this path for writing, or truncate it if it exists.
+    pub fn create(&self) -> io::Result<File> {
+        File::create(&self.0)
+    }
+}
+
+impl<T: AsRef<OsStr>> Untrusted<T> {
+    /// The value with [`replace_control_chars`] applied.
+    pub fn sanitized(&self, keep_newlines: bool) -> String {
+        replace_control_chars(&self.0.as_ref().to_string_lossy(), keep_newlines)
+    }
+}
+
+impl<T: AsRef<OsStr>> fmt::Display for Untrusted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.sanitized(false))
+    }
+}
+
+impl<T: AsRef<OsStr>> fmt::Debug for Untrusted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Untrusted").field(&self.to_string()).finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::replace_control_chars;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    use testresult::TestResult;
+
+    use super::{replace_control_chars, Untrusted};
 
     /// Test cases for test_replace_control_chars containing tuples
     /// with format (input, expected_newlines_no_preserve,
@@ -96,5 +184,43 @@ mod tests {
                 "replace_control_chars(true) failed for input: {input:?}",
             );
         }
+    }
+
+    #[test]
+    fn test_untrusted_is_sanitized_when_printed() {
+        let raw = "dir/\x1b[31mevil\n.pdf";
+        let expected = "dir/\u{FFFD}[31mevil\u{FFFD}.pdf";
+
+        let text = Untrusted::new(raw);
+        assert_eq!(text.to_string(), expected);
+        assert_eq!(format!("{text:?}"), format!("Untrusted({expected:?})"));
+        assert_eq!(text.sanitized(true), "dir/\u{FFFD}[31mevil\n.pdf");
+
+        let path = Untrusted::new(PathBuf::from(raw));
+        assert_eq!(path.to_string(), expected);
+    }
+
+    #[test]
+    fn test_untrusted_path_from() {
+        let raw = "\x1b[31mevil\n.pdf";
+        let expected = "\u{FFFD}[31mevil\u{FFFD}.pdf";
+
+        let from_str: Untrusted<PathBuf> = raw.into();
+        let from_path_buf: Untrusted<PathBuf> = PathBuf::from(raw).into();
+        assert_eq!(from_str.to_string(), expected);
+        assert_eq!(from_path_buf.to_string(), expected);
+    }
+
+    #[test]
+    fn test_untrusted_path_create_and_read() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = Untrusted::new(dir.path().join("\x1b[31mevil\n.pdf"));
+
+        path.create()?.write_all(b"data")?;
+        assert_eq!(path.read()?, b"data");
+
+        path.create()?;
+        assert_eq!(path.read()?, b"");
+        Ok(())
     }
 }
