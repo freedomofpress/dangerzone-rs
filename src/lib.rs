@@ -1,9 +1,7 @@
-// TODO: A library shouldn't use anyhow::Result. Use e.g thiserror instead.
-use anyhow::{Context, Result};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use ocr::OcrBackend;
-use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -13,8 +11,11 @@ mod error;
 mod ocr;
 mod util;
 
-pub use error::{CorruptedPageField, OcrError, PageError, PixelDataError};
+pub use error::{CorruptedPageField, Error, OcrError, PageError, PixelDataError};
 pub use util::{replace_control_chars, Untrusted};
+
+/// Result type used by the library.
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
 pub const DPI: usize = 150;
@@ -208,7 +209,7 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
             .by_ref()
             .take(MAX_SANITIZED_CHUNK_BYTES)
             .read_until(b'\n', &mut line_buf)
-            .context("Failed to read output for sanitizing")?;
+            .map_err(Error::ContainerIo)?;
         if n == 0 {
             break;
         }
@@ -225,8 +226,8 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
         };
 
         out.write_all(sanitized_untrusted_prefix.as_bytes())
-            .context("Failed to write sanitized output")?;
-        out.flush().context("Failed to flush sanitized output")?;
+            .map_err(Error::Log)?;
+        out.flush().map_err(Error::Log)?;
     }
 
     Ok(())
@@ -238,6 +239,10 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
 /// and [`pixels_to_pdf`], with an OCR step before the last one if
 /// `apply_ocr` is set. OCR adds an invisible text layer to the PDF. Only
 /// English is supported for now.
+///
+/// # Errors
+///
+/// Returns an error if any of these steps fail. See [`Error`].
 pub fn convert_document(
     input: impl Into<Untrusted<PathBuf>>,
     output: impl Into<Untrusted<PathBuf>>,
@@ -263,6 +268,11 @@ pub fn convert_document(
 /// stdout.
 ///
 /// This is untrusted data. Pass it to [`parse_pixel_data`] before using it.
+///
+/// # Errors
+///
+/// Returns an error if the input file can't be read, if Podman can't be
+/// started, or if the container fails.
 pub fn convert_doc_to_pixels(input: impl Into<Untrusted<PathBuf>>) -> Result<Vec<u8>> {
     let input = input.into();
     eprintln!("Converting document to pixels...");
@@ -284,35 +294,29 @@ pub fn convert_doc_to_pixels(input: impl Into<Untrusted<PathBuf>>) -> Result<Vec
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context(format!(
-            "Failed to spawn container. Make sure podman is installed and the image '{IMAGE_NAME}' is pulled."
-        ))?;
+        .map_err(Error::PodmanCommand)?;
 
     // Take ownership of child stderr pipe and output sanitized text to parent stderr
-    let stderr = child
-        .stderr
-        .take()
-        .context("Failed to take ownership of stderr")?;
-    let stderr_thread = std::thread::spawn(move || -> Result<()> {
-        forward_sanitized_text(BufReader::new(stderr), std::io::stderr().lock())
+    let stderr = child.stderr.take().expect("container stderr is piped");
+    let stderr_thread = std::thread::spawn(move || {
+        forward_sanitized_text(BufReader::new(stderr), io::stderr().lock())
     });
 
     // Read the input document
-    let input_data = input
-        .read()
-        .with_context(|| format!("Failed to read input file '{input}'"))?;
+    let input_data = input.read().map_err(|source| Error::InputFile {
+        path: input.clone(),
+        source,
+    })?;
 
-    // Write the document to the container's stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&input_data)
-            .context("Failed to write to container stdin")?;
-    }
+    // Write the document to the container's stdin. If the container exits
+    // early, e.g. because the image is missing, this fails with a broken pipe.
+    // The exit status explains why, so check it before this error.
+    let mut stdin = child.stdin.take().expect("container stdin is piped");
+    let write_result = stdin.write_all(&input_data);
+    drop(stdin);
 
     // Read the output from the container
-    let output = child
-        .wait_with_output()
-        .context("Failed to wait for container")?;
+    let output = child.wait_with_output().map_err(Error::ContainerIo)?;
 
     // Read stderr from the container
     match stderr_thread.join() {
@@ -320,20 +324,30 @@ pub fn convert_doc_to_pixels(input: impl Into<Untrusted<PathBuf>>) -> Result<Vec
             eprintln!("Warning: stderr_thread panicked while forwarding container stderr");
         }
         Ok(Err(e)) => {
+            // Print the whole chain, e.g. "failed to forward the container's
+            // stderr: context: writing to stderr: Broken pipe".
+            let error: &dyn std::error::Error = &e;
+            let chain: Vec<String> = std::iter::successors(Some(error), |e| e.source())
+                .map(ToString::to_string)
+                .collect();
             eprintln!(
-                "Warning: Failed to forward container stderr: {err_sanitized}",
-                err_sanitized = replace_control_chars(&e.to_string(), true)
+                "Warning: {}",
+                Untrusted::new(chain.join(": ")).sanitized(true)
             );
         }
         Ok(Ok(_)) => {}
     }
 
+    // Podman exits with 125 if it fails itself, e.g. because the image is
+    // missing, and with 126 or 127 if it can't run the command in the image.
+    // Any other code comes from the converter.
     if !output.status.success() {
-        anyhow::bail!(
-            "Container failed with status: {}. The document format may be unsupported or corrupted.",
-            output.status
-        );
+        return Err(match output.status.code() {
+            Some(125..=127) => Error::ContainerRun(output.status),
+            _ => Error::Conversion(output.status),
+        });
     }
+    write_result.map_err(Error::ContainerIo)?;
 
     eprintln!("Document converted to pixels successfully");
     Ok(output.stdout)
@@ -342,6 +356,10 @@ pub fn convert_doc_to_pixels(input: impl Into<Untrusted<PathBuf>>) -> Result<Vec
 /// Write pages to a new PDF, one image per page.
 ///
 /// The file at `output` is overwritten if it exists.
+///
+/// # Errors
+///
+/// Returns an error if `pages` is empty or if the file can't be written.
 pub fn pixels_to_pdf(pages: &[PageData], output: &Untrusted<PathBuf>) -> Result<()> {
     eprintln!("Converting pixels to safe PDF...");
 
@@ -371,15 +389,16 @@ fn write_pages_to_pdf_file(
     output: &Untrusted<PathBuf>,
 ) -> Result<()> {
     if pages.is_empty() {
-        anyhow::bail!("No pages to convert");
+        return Err(Error::NoOutputPages);
     }
 
     let pdf_data = build_pdf(pages, ocr_pages);
-    let mut file = output
-        .create()
-        .with_context(|| format!("Failed to create output file '{output}'"))?;
-    file.write_all(&pdf_data)
-        .with_context(|| format!("Failed to write output file '{output}'"))
+    let output_error = |source| Error::OutputFile {
+        path: output.clone(),
+        source,
+    };
+    let mut file = output.create().map_err(output_error)?;
+    file.write_all(&pdf_data).map_err(output_error)
 }
 
 /// Compress data with zlib, for a PDF `/FlateDecode` stream.
@@ -716,6 +735,25 @@ mod tests {
     }
 
     #[test]
+    fn test_error_messages_include_causes() {
+        let err = Error::from(parse_err(&pixel_stream(1, &[(0, 10)])));
+        let mut chain = vec![err.to_string()];
+        let mut source = std::error::Error::source(&err);
+        while let Some(cause) = source {
+            chain.push(cause.to_string());
+            source = cause.source();
+        }
+        assert_eq!(
+            chain,
+            [
+                "invalid pixel data from the container",
+                "invalid page 1",
+                "page dimensions 0x10 are outside the allowed range of 1x1 to 10000x10000",
+            ]
+        );
+    }
+
+    #[test]
     fn test_page_data_new_checks_invariants() {
         assert!(PageData::new(2, 2, vec![0; 12]).is_ok());
         for len in [11, 13] {
@@ -914,7 +952,7 @@ mod tests {
             "UNTRUSTED> end\n",
         );
 
-        let reader = BufReader::new(std::io::Cursor::new(input.as_bytes()));
+        let reader = BufReader::new(io::Cursor::new(input.as_bytes()));
         let out = tempfile::NamedTempFile::new()?;
         let out_path = out.path().to_path_buf();
         let out_file = out.reopen()?;

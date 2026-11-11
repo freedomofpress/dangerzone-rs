@@ -1,10 +1,80 @@
 //! Error types returned by the library.
 
 use std::fmt;
+use std::io;
+use std::path::PathBuf;
+use std::process::ExitStatus;
 
-use crate::{MAX_PAGES, MAX_PAGE_HEIGHT, MAX_PAGE_WIDTH};
+use crate::util::Untrusted;
+use crate::{IMAGE_NAME, MAX_PAGES, MAX_PAGE_HEIGHT, MAX_PAGE_WIDTH};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// Errors returned by the conversion functions.
+///
+/// Paths in errors are [`Untrusted`], so the messages are safe to print.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// Podman could not be run.
+    #[error("failed to run podman; make sure it is installed and in your PATH")]
+    PodmanCommand(#[source] io::Error),
+
+    /// Podman ran, but could not start the container. Podman's own error is
+    /// printed to stderr.
+    #[error(
+        "podman could not start the container ({0}); make sure the image \
+         '{IMAGE_NAME}' is pulled"
+    )]
+    ContainerRun(ExitStatus),
+
+    /// Sending the document to the container or reading its output failed.
+    #[error("failed to communicate with the container")]
+    ContainerIo(#[source] io::Error),
+
+    /// Encountered an issue while logging a message.
+    #[error("failed to write to log")]
+    Log(#[source] io::Error),
+
+    /// The document converter in the container exited with a non-zero
+    /// status.
+    #[error(
+        "container failed with {0}; the document format may be unsupported \
+         or corrupted"
+    )]
+    Conversion(ExitStatus),
+
+    /// The container returned invalid pixel data. You can learn more about
+    /// this error by consulting the `PixelDataError` variants.
+    #[error("invalid pixel data from the container")]
+    PixelData(#[from] PixelDataError),
+
+    /// The input document could not be read.
+    #[error("failed to read input file '{path}'")]
+    InputFile {
+        /// Path of the input document.
+        path: Untrusted<PathBuf>,
+        /// The underlying error.
+        source: io::Error,
+    },
+
+    /// The PDF could not be created or written.
+    #[error("failed to save the PDF to '{path}'")]
+    OutputFile {
+        /// Path of the PDF.
+        path: Untrusted<PathBuf>,
+        /// The underlying error.
+        source: io::Error,
+    },
+
+    /// [`pixels_to_pdf`](crate::pixels_to_pdf) was called without pages.
+    #[error("no pages to convert")]
+    NoOutputPages,
+
+    /// OCR failed.
+    #[error(transparent)] // the underlying error has the actual details
+    Ocr(#[from] OcrError),
+}
 
 /// Errors in the pixel stream that the container writes.
 ///
