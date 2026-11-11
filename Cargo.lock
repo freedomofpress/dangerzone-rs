@@ -320,6 +320,7 @@ dependencies = [
  "rayon",
  "tempfile",
  "testresult",
+ "thiserror",
  "unicode-general-category",
  "walkdir",
  "xberg-tesseract",
