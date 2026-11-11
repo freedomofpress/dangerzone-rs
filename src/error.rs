@@ -4,6 +4,8 @@ use std::fmt;
 
 use crate::{MAX_PAGES, MAX_PAGE_HEIGHT, MAX_PAGE_WIDTH};
 
+type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Errors in the pixel stream that the container writes.
 ///
 /// Page numbers start at 1.
@@ -99,4 +101,22 @@ pub enum PageError {
         /// The length of the buffer.
         actual: usize,
     },
+}
+
+/// Errors from the OCR backend.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OcrError {
+    /// A Tesseract or Leptonica call failed.
+    #[error("Tesseract failed to {action}")]
+    Tesseract {
+        /// What we were trying to do, e.g. "run text recognition".
+        action: &'static str,
+        /// The error from Tesseract.
+        source: BoxError,
+    },
+
+    /// The thread pool for OCR could not be created.
+    #[error("failed to create the OCR thread pool")]
+    ThreadPool(#[source] BoxError),
 }

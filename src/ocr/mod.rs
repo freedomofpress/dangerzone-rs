@@ -1,8 +1,6 @@
 //! Components and logic to handle OCR
 
-use anyhow::Result;
-
-use crate::PageData;
+use crate::{OcrError, PageData};
 
 pub(crate) mod pdf_renderer;
 pub(crate) mod xberg_tesseract;
@@ -76,5 +74,5 @@ pub(crate) trait OcrBackend {
     /// Run OCR for multiple pages.
     /// Each back-end can defer this method call to it's own internal implementation
     /// to handle OCR on different pages (e.g parallel vs sequential).
-    fn ocr_pages(&self, pages: &[PageData]) -> Result<Vec<OcrPage>>;
+    fn ocr_pages(&self, pages: &[PageData]) -> Result<Vec<OcrPage>, OcrError>;
 }
