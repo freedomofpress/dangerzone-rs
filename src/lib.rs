@@ -358,11 +358,12 @@ fn write_pages_to_pdf_file(
         anyhow::bail!("No pages to convert");
     }
 
+    let pdf_data = build_pdf(pages, ocr_pages);
     let mut file = File::create(output_path).context(format!(
         "Failed to create output file '{output_path_sanitized}'",
         output_path_sanitized = replace_control_chars(output_path, false)
     ))?;
-    write_pdf(&mut file, pages, ocr_pages).context(write_context)
+    file.write_all(&pdf_data).context(write_context)
 }
 
 /// Convert a document to a safe PDF in one call
@@ -377,22 +378,28 @@ pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool
     pixels_to_pdf(pages, output_path).context("Failed to convert pixels to PDF")
 }
 
-/// Write a minimal PDF file with embedded RGB pixel data
-fn write_pdf<W: Write>(
-    writer: &mut W,
-    pages: &[PageData],
-    ocr_pages: Option<&[ocr::OcrPage]>,
-) -> Result<()> {
+/// Compress data with zlib, for a PDF `/FlateDecode` stream.
+fn zlib_compress(data: &[u8]) -> Vec<u8> {
+    // The encoder only fails if its writer fails, and writing to a `Vec`
+    // never does.
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(data)
+        .expect("compressing into a Vec can't fail");
+    encoder.finish().expect("compressing into a Vec can't fail")
+}
+
+/// Build a minimal PDF file with embedded RGB pixel data
+fn build_pdf(pages: &[PageData], ocr_pages: Option<&[ocr::OcrPage]>) -> Vec<u8> {
     if let Some(ocr_pages) = ocr_pages {
         if ocr_pages.len() != pages.len() {
-            anyhow::bail!(
+            panic!(
                 "OCR page count ({}) does not match PDF page count ({})",
                 ocr_pages.len(),
                 pages.len()
             );
         }
     }
-
     let mut pdf_data = Vec::new();
     let mut object_offsets = Vec::new();
     let has_ocr = ocr_pages.is_some();
@@ -438,7 +445,7 @@ fn write_pdf<W: Write>(
 
     // If OCR is used, embed our OCR font objects into the PDF.
     if has_ocr {
-        ocr::pdf_renderer::embed_ocr_font(&mut pdf_data, &mut object_offsets)?;
+        ocr::pdf_renderer::embed_ocr_font(&mut pdf_data, &mut object_offsets);
     }
 
     let first_content_object_index_curr_page = first_object_on_first_page_index + pages.len() * 2;
@@ -498,11 +505,7 @@ fn write_pdf<W: Write>(
         pdf_data.extend_from_slice(b"/BitsPerComponent 8\n");
 
         // Compress pixel data using Flate compression
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(&page.pixels)
-            .context("Failed to compress pixel data")?;
-        let compressed_pixels = encoder.finish().context("Failed to finish compression")?;
+        let compressed_pixels = zlib_compress(&page.pixels);
 
         pdf_data.extend_from_slice(b"/Filter /FlateDecode\n");
         pdf_data.extend_from_slice(format!("/Length {}\n", compressed_pixels.len()).as_bytes());
@@ -556,10 +559,7 @@ fn write_pdf<W: Write>(
     pdf_data.extend_from_slice(format!("{xref_offset}\n").as_bytes());
     pdf_data.extend_from_slice(b"%%EOF\n");
 
-    writer
-        .write_all(&pdf_data)
-        .context("Failed to write PDF data")?;
-    Ok(())
+    pdf_data
 }
 
 /// Convert a document to a safe PDF and add an OCR text layer.
@@ -753,9 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pdf_generation() {
-        use std::io::Cursor;
-
+    fn test_pdf_generation() -> TestResult {
         let width = 10u16;
         let height = 10u16;
         let mut pixels = Vec::new();
@@ -766,18 +764,10 @@ mod tests {
             pixels.push(0);
         }
 
-        let page = PageData {
-            width,
-            height,
-            pixels,
-        };
+        let page = PageData::new(width, height, pixels)?;
         let pages = vec![page];
 
-        let mut buffer = Cursor::new(Vec::new());
-        let result = write_pdf(buffer.get_mut(), &pages, None);
-        assert!(result.is_ok(), "PDF generation should succeed");
-
-        let pdf_data = buffer.into_inner();
+        let pdf_data = build_pdf(&pages, None);
         assert!(!pdf_data.is_empty(), "PDF should have data");
 
         let header = String::from_utf8_lossy(&pdf_data[0..9]);
@@ -806,12 +796,11 @@ mod tests {
             trailer.contains("/Filter /FlateDecode"),
             "PDF should use Flate compression for images"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_pdf_compression_reduces_size() {
-        use std::io::Cursor;
-
+    fn test_pdf_compression_reduces_size() -> TestResult {
         let width = 100u16;
         let height = 100u16;
         let mut pixels = Vec::new();
@@ -822,18 +811,10 @@ mod tests {
             pixels.push(0);
         }
 
-        let page = PageData {
-            width,
-            height,
-            pixels: pixels.clone(),
-        };
+        let page = PageData::new(width, height, pixels.clone())?;
         let pages = vec![page];
 
-        let mut buffer = Cursor::new(Vec::new());
-        let result = write_pdf(buffer.get_mut(), &pages, None);
-        assert!(result.is_ok(), "PDF generation should succeed");
-
-        let pdf_data = buffer.into_inner();
+        let pdf_data = build_pdf(&pages, None);
 
         let uncompressed_pixel_size = pixels.len();
         assert_eq!(uncompressed_pixel_size, 30000);
@@ -851,19 +832,18 @@ mod tests {
             pdf_data.len() < estimated_uncompressed_pdf_size / 2,
             "PDF with compression should be significantly smaller than uncompressed"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_pdf_generation_with_hidden_ocr_text() {
-        use std::io::Cursor;
-
+    fn test_pdf_generation_with_hidden_ocr_text() -> TestResult {
         let width = 10u16;
         let height = 10u16;
-        let page = PageData {
+        let page = PageData::new(
             width,
             height,
-            pixels: vec![255; width as usize * height as usize * 3],
-        };
+            vec![255; width as usize * height as usize * 3],
+        )?;
         let pages = vec![page];
         let ocr_pages = vec![ocr::OcrPage::from_test_words(vec![(
             "hello (pdf)",
@@ -873,11 +853,8 @@ mod tests {
             4,
         )])];
 
-        let mut buffer = Cursor::new(Vec::new());
-        let result = write_pdf(buffer.get_mut(), &pages, Some(&ocr_pages));
-        assert!(result.is_ok(), "PDF generation with OCR should succeed");
-
-        let pdf_data = String::from_utf8_lossy(&buffer.into_inner()).into_owned();
+        let pdf_data = build_pdf(&pages, Some(&ocr_pages));
+        let pdf_data = String::from_utf8_lossy(&pdf_data).into_owned();
         assert!(
             pdf_data.contains("/Font << /OcrFont"),
             "PDF should include OCR font resource"
@@ -902,9 +879,8 @@ mod tests {
                 let obj_num: usize = rest
                     .split_whitespace()
                     .next()
-                    .expect("contents object number")
-                    .parse()
-                    .expect("valid contents object number");
+                    .ok_or("missing contents object number")?
+                    .parse()?;
                 content_refs.push(obj_num);
             }
         }
@@ -918,6 +894,7 @@ mod tests {
                 "Missing content object for /Contents reference: {obj_num} 0 R"
             );
         }
+        Ok(())
     }
 
     #[test]
