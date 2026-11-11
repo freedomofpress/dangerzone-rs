@@ -3,8 +3,8 @@ use anyhow::{Context, Result};
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use ocr::OcrBackend;
-use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::ocr::XbergTesseractOcr;
@@ -232,8 +232,39 @@ fn forward_sanitized_text<R: BufRead, W: Write + IsTerminal>(
     Ok(())
 }
 
-/// Convert a document to raw RGB pixel data using the Dangerzone container
-pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
+/// Convert a document to a safe PDF.
+///
+/// This is the same as calling [`convert_doc_to_pixels`], [`parse_pixel_data`]
+/// and [`pixels_to_pdf`], with an OCR step before the last one if
+/// `apply_ocr` is set. OCR adds an invisible text layer to the PDF. Only
+/// English is supported for now.
+pub fn convert_document(
+    input: impl Into<Untrusted<PathBuf>>,
+    output: impl Into<Untrusted<PathBuf>>,
+    apply_ocr: bool,
+) -> Result<()> {
+    let output = output.into();
+    let pixel_data = convert_doc_to_pixels(input)?;
+    let pages = parse_pixel_data(&pixel_data)?;
+    drop(pixel_data);
+
+    // TODO: When having the implementations for Apple Vision and windows.media.ocr
+    // I want to use conditional compilation flags to dynamically set the OCR backend.
+    if apply_ocr {
+        eprintln!("Applying OCR with integrated backend...");
+        let ocr_pages = XbergTesseractOcr::new().ocr_pages(&pages)?;
+        pixels_to_pdf_with_ocr(&pages, &ocr_pages, &output)
+    } else {
+        pixels_to_pdf(&pages, &output)
+    }
+}
+
+/// Run the document through the container, and return what it writes to its
+/// stdout.
+///
+/// This is untrusted data. Pass it to [`parse_pixel_data`] before using it.
+pub fn convert_doc_to_pixels(input: impl Into<Untrusted<PathBuf>>) -> Result<Vec<u8>> {
+    let input = input.into();
     eprintln!("Converting document to pixels...");
 
     let mut args = vec!["run".to_string()];
@@ -267,14 +298,9 @@ pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
     });
 
     // Read the input document
-    let mut input_file = File::open(&input_path).context(format!(
-        "Failed to open input file '{input_path_sanitized}'",
-        input_path_sanitized = replace_control_chars(&input_path, false)
-    ))?;
-    let mut input_data = Vec::new();
-    input_file
-        .read_to_end(&mut input_data)
-        .context("Failed to read input file")?;
+    let input_data = input
+        .read()
+        .with_context(|| format!("Failed to read input file '{input}'"))?;
 
     // Write the document to the container's stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -313,16 +339,15 @@ pub fn convert_doc_to_pixels(input_path: String) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Convert pixel data to a PDF file
-pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
+/// Write pages to a new PDF, one image per page.
+///
+/// The file at `output` is overwritten if it exists.
+pub fn pixels_to_pdf(pages: &[PageData], output: &Untrusted<PathBuf>) -> Result<()> {
     eprintln!("Converting pixels to safe PDF...");
 
-    write_pages_to_pdf_file(&pages, None, &output_path, "Failed to write PDF")?;
+    write_pages_to_pdf_file(pages, None, &output)?;
 
-    eprintln!(
-        "Safe PDF created successfully at: {output_path_sanitized}",
-        output_path_sanitized = replace_control_chars(&output_path, false)
-    );
+    eprintln!("Safe PDF created successfully at: {output}");
     Ok(())
 }
 
@@ -330,52 +355,31 @@ pub fn pixels_to_pdf(pages: Vec<PageData>, output_path: String) -> Result<()> {
 fn pixels_to_pdf_with_ocr(
     pages: &[PageData],
     ocr_pages: &[ocr::OcrPage],
-    output_path: &str,
+    output: &Untrusted<PathBuf>,
 ) -> Result<()> {
     eprintln!("Converting pixels to safe PDF with OCR text layer...");
 
-    write_pages_to_pdf_file(
-        pages,
-        Some(ocr_pages),
-        output_path,
-        "Failed to write PDF with OCR",
-    )?;
+    write_pages_to_pdf_file(pages, Some(ocr_pages), output)?;
 
-    eprintln!(
-        "Safe PDF with OCR created successfully at: {output_path_sanitized}",
-        output_path_sanitized = replace_control_chars(output_path, false)
-    );
+    eprintln!("Safe PDF with OCR created successfully at: {output}");
     Ok(())
 }
 
 fn write_pages_to_pdf_file(
     pages: &[PageData],
     ocr_pages: Option<&[ocr::OcrPage]>,
-    output_path: &str,
-    write_context: &'static str,
+    output: &Untrusted<PathBuf>,
 ) -> Result<()> {
     if pages.is_empty() {
         anyhow::bail!("No pages to convert");
     }
 
     let pdf_data = build_pdf(pages, ocr_pages);
-    let mut file = File::create(output_path).context(format!(
-        "Failed to create output file '{output_path_sanitized}'",
-        output_path_sanitized = replace_control_chars(output_path, false)
-    ))?;
-    file.write_all(&pdf_data).context(write_context)
-}
-
-/// Convert a document to a safe PDF in one call
-pub fn convert_document(input_path: String, output_path: String, apply_ocr: bool) -> Result<()> {
-    if apply_ocr {
-        return apply_ocr_fn(input_path, output_path);
-    }
-
-    let pixels_data = convert_doc_to_pixels(input_path)?;
-    let pages = parse_pixel_data(&pixels_data)?;
-
-    pixels_to_pdf(pages, output_path).context("Failed to convert pixels to PDF")
+    let mut file = output
+        .create()
+        .with_context(|| format!("Failed to create output file '{output}'"))?;
+    file.write_all(&pdf_data)
+        .with_context(|| format!("Failed to write output file '{output}'"))
 }
 
 /// Compress data with zlib, for a PDF `/FlateDecode` stream.
@@ -560,25 +564,6 @@ fn build_pdf(pages: &[PageData], ocr_pages: Option<&[ocr::OcrPage]>) -> Vec<u8> 
     pdf_data.extend_from_slice(b"%%EOF\n");
 
     pdf_data
-}
-
-/// Convert a document to a safe PDF and add an OCR text layer.
-// TODO: When having the implementations for Apple Vision and windows.media.ocr
-// I want to use conditional compilation flags to dynamically set the OCR backend.
-// This way `apply_ocr_fn` should be platform aware.
-pub fn apply_ocr_fn(input_path: String, output_path: String) -> Result<()> {
-    eprintln!("Applying OCR with integrated backend...");
-
-    let pixels_data = convert_doc_to_pixels(input_path)?;
-    let pages = parse_pixel_data(&pixels_data)?;
-
-    let backend = XbergTesseractOcr::new();
-    let ocr_pages = backend
-        .ocr_pages(&pages)
-        .context("Failed to run OCR backend")?;
-
-    pixels_to_pdf_with_ocr(&pages, &ocr_pages, &output_path)
-        .context("Failed to convert pixels to OCR PDF")
 }
 
 #[cfg(test)]
