@@ -106,7 +106,7 @@ Available platforms:
 #### Build from Source
 
 **Prerequisites:**
-For static linking the `kreuzberg-tesseract` crate you need to have:
+For static linking the `xberg-tesseract` crate you need to have:
 
 - A C++ compiler (e.g., gcc, clang, MSVC on Windows)
 - CMake 3.x or later
