@@ -13,7 +13,7 @@ mod error;
 mod ocr;
 mod util;
 
-pub use error::{CorruptedPageField, PageError, PixelDataError};
+pub use error::{CorruptedPageField, OcrError, PageError, PixelDataError};
 pub use util::{replace_control_chars, Untrusted};
 
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
