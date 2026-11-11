@@ -6,63 +6,94 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  audit:
-    name: Dependency security audit
+  zizmor:
+    name: Audit GitHub workflows
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read # to check out the code
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      with:
+        persist-credentials: false
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+    - name: Run zizmor
+      uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
+      with:
+        advanced-security: false
+        version: 1.31.1
 
-    - name: Install cargo-audit
-      run: cargo install cargo-audit --locked
+  cargo-deny:
+    name: Audit dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # to check out the code
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      with:
+        persist-credentials: false
 
-    - name: Audit dependencies
-      run: cargo audit -D warnings
+    - name: Run cargo-deny
+      uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      with:
+        command: check advisories bans licenses sources
 
   lint:
+    name: Lint
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: read # to check out the code
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       with:
-        components: rustfmt, clippy
-    
-    - name: Install dependencies
+        persist-credentials: false
+
+    - name: Install Rust
       run: |
-        sudo apt-get update
-        sudo apt-get install -y podman poppler-utils
+        rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        rustup default stable
 
     - name: Cache cargo
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-lint-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-
-    
+          ${{ runner.os }}-lint-cargo-
+
     - name: Check formatting
       run: cargo fmt --all -- --check
-    
-    - name: Run clippy
-      run: cargo clippy --all-targets -- -D warnings
-    
+
+    # The lints themselves are configured in Cargo.toml and clippy.toml.
+    - name: Run clippy (default features)
+      run: cargo clippy --locked --all-targets -- -D warnings
+
+    - name: Run clippy (no default features)
+      run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+
+    - name: Check documentation
+      run: cargo doc --locked --no-deps --all-features
+      env:
+        RUSTDOCFLAGS: -D warnings
+
   build-and-test:
     name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read # to check out the code
 
     strategy:
       fail-fast: false
@@ -70,13 +101,18 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      with:
+        persist-credentials: false
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      shell: bash
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
 
     - name: Cache cargo
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: |
           ~/.cargo/registry
@@ -87,7 +123,11 @@ jobs:
           ${{ runner.os }}-cargo-
 
     - name: Build project
-      run: cargo build --release
+      run: cargo build --locked --release
 
     - name: Run tests
-      run: cargo test --all-targets
+      run: cargo test --locked --all-targets
+
+    # `--all-targets` does not include doctests.
+    - name: Run doctests
+      run: cargo test --locked --doc
