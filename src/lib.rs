@@ -1,3 +1,31 @@
+//! Convert potentially dangerous documents into safe PDFs.
+//!
+//! This is a Rust implementation of [Dangerzone](https://dangerzone.rocks).
+//! The document is rendered to pixels inside a Podman container that has no
+//! network access, and a new PDF is built from those pixels on the host.
+//! Optionally, OCR adds an invisible text layer, so that the text in the PDF
+//! can be searched and copied.
+//!
+//! ```no_run
+//! use dangerzone_rs::convert_document;
+//!
+//! convert_document("unsafe.docx", "safe.pdf", true)?;
+//! # Ok::<(), dangerzone_rs::Error>(())
+//! ```
+//!
+//! [`convert_document`] runs the steps below, which can also be called one by
+//! one:
+//!
+//! 1. [`convert_doc_to_pixels`] runs the container and returns its output.
+//! 2. [`parse_pixel_data`] checks that output and splits it into pages.
+//! 3. [`pixels_to_pdf`] writes the pages to a PDF.
+//!
+//! The container image ([`IMAGE_NAME`]) must already be pulled.
+//!
+//! # Features
+//!
+//! - `cli` (default): the `dangerzone-rs` binary.
+
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use ocr::OcrBackend;
@@ -18,8 +46,12 @@ pub use util::{replace_control_chars, Untrusted};
 /// Result type used by the library.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// The container image that converts documents to pixels.
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
+/// The resolution the container renders pages at. It sets the size of the
+/// pages in the PDF.
 pub const DPI: usize = 150;
+/// Maximum size of lines in stderr.
 const MAX_SANITIZED_CHUNK_BYTES: u64 = 64 * 1024;
 /// Maximum number of pages we accept from the sandbox.
 pub const MAX_PAGES: u16 = 10000;

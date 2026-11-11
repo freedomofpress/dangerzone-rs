@@ -1,3 +1,5 @@
+//! The `dangerzone-rs` command-line tool.
+
 use std::path::PathBuf;
 
 use anyhow::Result;
