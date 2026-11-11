@@ -266,6 +266,7 @@ dependencies = [
  "pyo3",
  "rayon",
  "tempfile",
+ "testresult",
  "unicode-general-category",
  "walkdir",
 ]
@@ -1512,6 +1513,12 @@ dependencies = [
  "rustix",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "testresult"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ad5f489c3aa16cefe5a90ee2d0390b1f8b31065a9a6694b36d85f2b96da7b27"
 
 [[package]]
 name = "thiserror"
