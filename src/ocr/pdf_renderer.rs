@@ -137,7 +137,7 @@ pub(crate) fn append_ocr_text_layer(content: &mut String, ocr_page: &OcrPage, he
     // OCR gives word boxes in page pixels, measured from the top-left.
     // PDF text positions use points, measured from the bottom-left, so
     // each word position must be scaled and flipped vertically.
-    let scale = 72.0 / DPI;
+    let scale = 72.0 / DPI as f32;
 
     // This is a hardcoded const used for calibration to determine how wide the PDF would
     // make a hidden word. If we change font metrics of our OCR fonts like `/ DW` this
