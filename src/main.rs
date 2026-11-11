@@ -1,24 +1,26 @@
-use anyhow::Result;
-use clap::Parser;
-use dangerzone_rs::convert_document;
-use util::replace_control_chars;
+//! The `dangerzone-rs` command-line tool.
 
-mod util;
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::builder::{PathBufValueParser, TypedValueParser};
+use clap::Parser;
+use dangerzone_rs::{convert_document, Untrusted};
 
 /// A simple Dangerzone CLI implementation in Rust
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Input document path
-    #[arg(short, long)]
-    input: String,
+    #[arg(short, long, value_parser = PathBufValueParser::new().map(Untrusted::new))]
+    input: Untrusted<PathBuf>,
 
     /// Output PDF path
-    #[arg(short, long)]
-    output: String,
+    #[arg(short, long, value_parser = PathBufValueParser::new().map(Untrusted::new))]
+    output: Untrusted<PathBuf>,
 
     /// Enable OCR to add text layer to PDF
-    #[arg(long, default_value = "false")]
+    #[arg(long)]
     ocr: bool,
 }
 
@@ -27,14 +29,8 @@ fn main() -> Result<()> {
 
     eprintln!("Dangerzone Rust CLI");
     eprintln!("Using container runtime: podman");
-    eprintln!(
-        "Input: {input_sanitized}",
-        input_sanitized = replace_control_chars(&args.input, false)
-    );
-    eprintln!(
-        "Output: {output_sanitized}",
-        output_sanitized = replace_control_chars(&args.output, false)
-    );
+    eprintln!("Input: {}", args.input);
+    eprintln!("Output: {}", args.output);
     if args.ocr {
         eprintln!("OCR: enabled");
     }

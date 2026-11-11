@@ -1,48 +1,55 @@
-//! OCR backend powered by `kreuzberg-tesseract`.
+//! OCR backend powered by `xberg-tesseract`.
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
-use kreuzberg_tesseract::{Pix, ResultIterator, TesseractAPI};
 use rayon::{prelude::*, ThreadPoolBuilder};
+use xberg_tesseract::{Pix, ResultIterator, TesseractAPI, TesseractError};
 
-use crate::{PageData, DPI};
+use crate::{OcrError, PageData, DPI};
 
 use super::{OcrBackend, OcrPage, OcrVBox, OcrWord};
 
-/// OCR backend powered by `kreuzberg-tesseract`.
-pub(crate) struct KreuzbergTesseractOcr;
+/// Tesseract's `OEM_DEFAULT` engine mode, which `TesseractAPI::init()` uses
+/// as well. `xberg-tesseract` doesn't export it.
+const OEM_DEFAULT: i32 = 3;
 
-/// Since the `KreuzbergTesseractOcr` backend will be always called
+/// OCR backend powered by `xberg-tesseract`.
+pub(crate) struct XbergTesseractOcr;
+
+/// Since the `XbergTesseractOcr` backend will be always called
 /// in parallel, we need a seperate type representing the worker.
 /// This worker will be initialized in the Rayon workers, and will
 /// contain the logic to do OCR work for a page.
-struct KreuzbergTesseractOcrWorker {
+struct XbergTesseractOcrWorker {
     api: TesseractAPI,
 }
 
-impl KreuzbergTesseractOcrWorker {
+impl XbergTesseractOcrWorker {
     /// Create new instance of OCR worker. This worker will
     /// contain the logic to init the Tesseract API instance + doing
     /// OCR for a page. Since each Rayon worker will have one
     /// OCR-worker this is the logical structure.
-    fn new() -> Result<Self> {
-        let api = TesseractAPI::new().context("Failed to create Tesseract API")?;
-        let tessdata_dir = Self::tessdata_dir().context("Failed to find Tesseract tessdata")?;
+    fn new() -> Result<Self, OcrError> {
+        let api = TesseractAPI::new().map_err(tesseract_error("create the Tesseract API"))?;
 
         // Seed Tesseract with trained language data.
         // TODO: Currently we only support English. Support other languages too.
         // See https://github.com/freedomofpress/dangerzone-rs/issues/14
-        api.init(&tessdata_dir, "eng")
-            .context("Failed to initialize Tesseract API")?;
+        match Self::tessdata_dir() {
+            Some(tessdata_dir) => api.init(&tessdata_dir, "eng"),
+            None => Self::init_with_bundled_tessdata(&api),
+        }
+        .map_err(tesseract_error("initialize the Tesseract API"))?;
 
         Ok(Self { api })
     }
 
     /// Resolve the tessdata directory used to initialize Tesseract
     ///
-    /// `TESSDATA_PREFIX` has priority when set. Otherwise we use the tessdata
-    /// bundled by `kreuzberg-tesseract`.
+    /// `TESSDATA_PREFIX` has priority when set, followed by the places where
+    /// Tesseract is usually installed. Only directories with English language
+    /// data count, so that an empty or partial install doesn't shadow the
+    /// language data embedded in the binary.
     fn tessdata_dir() -> Option<PathBuf> {
         let mut candidates = Vec::new();
 
@@ -52,35 +59,16 @@ impl KreuzbergTesseractOcrWorker {
             candidates.push(Self::as_tessdata_dir(PathBuf::from(path)));
         }
 
-        // `kreuzberg-tesseract`'s build script downloads bundled English
-        // traineddata under {TESSDATA_PREFIX_BUNDLED}/tessdata and exports the
-        // prefix at compile time.
-        if let Some(path) = option_env!("TESSDATA_PREFIX_BUNDLED") {
-            candidates.push(Self::as_tessdata_dir(PathBuf::from(path)));
-        }
-
         #[cfg(target_os = "linux")]
         {
             // Common package locations for Tesseract 5 and older distro
             // layouts. These are used when tessdata was installed system-wide.
             candidates.push(PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"));
             candidates.push(PathBuf::from("/usr/share/tesseract-ocr/tessdata"));
-
-            // Cache directory used by `kreuzberg-tesseract`.
-            if let Some(home) = std::env::var_os("HOME") {
-                candidates.push(PathBuf::from(home).join(".kreuzberg-tesseract/tessdata"));
-            }
         }
 
         #[cfg(target_os = "macos")]
         {
-            if let Some(home) = std::env::var_os("HOME") {
-                candidates.push(
-                    PathBuf::from(home)
-                        .join("Library/Application Support/kreuzberg-tesseract/tessdata"),
-                );
-            }
-
             // Homebrew's default prefixes on Apple Silicon and Intel Macs.
             candidates.push(PathBuf::from("/opt/homebrew/share/tessdata"));
             candidates.push(PathBuf::from("/usr/local/share/tessdata"));
@@ -88,17 +76,6 @@ impl KreuzbergTesseractOcrWorker {
 
         #[cfg(target_os = "windows")]
         {
-            // Default cache used by kreuzberg-tesseract's Windows build.
-            candidates.push(PathBuf::from(r"C:\tess\tessdata"));
-
-            if let Some(app_data) = std::env::var_os("APPDATA") {
-                candidates.push(
-                    PathBuf::from(app_data)
-                        .join("kreuzberg-tesseract")
-                        .join("tessdata"),
-                );
-            }
-
             // Standard locations used by Windows Tesseract installers.
             for program_files in ["ProgramFiles", "ProgramFiles(x86)"] {
                 if let Some(path) = std::env::var_os(program_files) {
@@ -107,7 +84,17 @@ impl KreuzbergTesseractOcrWorker {
             }
         }
 
-        candidates.into_iter().find(|path| path.is_dir())
+        candidates
+            .into_iter()
+            .find(|path| path.join("eng.traineddata").is_file())
+    }
+
+    /// Initialize Tesseract with the English language data that the build
+    /// embeds in the binary, so that OCR works without installing Tesseract.
+    fn init_with_bundled_tessdata(api: &TesseractAPI) -> xberg_tesseract::Result<()> {
+        let data = xberg_tesseract::bundled_eng_traineddata().ok_or(TesseractError::InitError)?;
+        let size = i32::try_from(data.len()).map_err(|_| TesseractError::InitError)?;
+        api.init_5(data, size, "eng", OEM_DEFAULT, &[])
     }
 
     // TESSDATA_PREFIX can either mean the tessdata directory itself or the parent prefix. This is
@@ -120,45 +107,45 @@ impl KreuzbergTesseractOcrWorker {
         }
     }
 
-    fn ocr_page(&self, pixels: &[u8], width: u16, height: u16) -> Result<OcrPage> {
+    fn ocr_page(&self, pixels: &[u8], width: u16, height: u16) -> Result<OcrPage, OcrError> {
         // Pass container's bytes directly using Leptonica's Pix wrapper
-        // exposed by `kreuzberg-tesseract`.
+        // exposed by `xberg-tesseract`.
         let rgb_pix = Pix::from_raw_rgb(pixels, width.into(), height.into())
-            .context("Failed to create Leptonica Pix from RGB pixels")?;
+            .map_err(tesseract_error("create a Leptonica Pix from RGB pixels"))?;
 
         // Convert the container-rendered RGB page to grayscale before OCR.
         let mut pix = rgb_pix
             .to_grayscale()
-            .context("Failed to convert OCR image to grayscale")?;
+            .map_err(tesseract_error("convert the OCR image to grayscale"))?;
 
         let dpi = DPI as i32;
 
         // Store the container-rendered resolution on the Pix as image metadata
         // so Tesseract can interpret text size correctly.
         pix.set_resolution(dpi, dpi)
-            .context("Failed to set OCR image resolution")?;
+            .map_err(tesseract_error("set the OCR image resolution"))?;
 
         // Give Tesseract the Leptonica image. `set_image_2` borrows the Pix
         // pointer; keep `pix` alive for the rest of this method.
         self.api
             .set_image_2(pix.as_ptr())
-            .context("Failed to pass image to Tesseract")?;
+            .map_err(tesseract_error("set the image"))?;
 
         self.api
             .recognize()
-            .context("Failed to run Tesseract recognition")?;
+            .map_err(tesseract_error("run text recognition"))?;
 
         let iterator = self
             .api
             .get_iterator()
-            .context("Failed to get Tesseract result iterator")?;
+            .map_err(tesseract_error("get the result iterator"))?;
 
         Ok(OcrPage::new(extract_ocr_words(&iterator)?))
     }
 }
 
-impl KreuzbergTesseractOcr {
-    /// Create instance of `KreuzbergTesseractOcr`.
+impl XbergTesseractOcr {
+    /// Create instance of `XbergTesseractOcr`.
     /// This type only contains methods to call logic for
     /// parallel OCR.
     pub(crate) fn new() -> Self {
@@ -176,56 +163,61 @@ impl KreuzbergTesseractOcr {
 
     /// Handle OCR for all pages in parallel.
     /// This method creates a pool of Rayon workers, each Rayon-worker will initialize it's own
-    /// instance of a `KreuzbergTesseractWorker` containing a Tesseract object.
-    fn ocr_pages_parallel(&self, pages: &[PageData]) -> Result<Vec<OcrPage>> {
+    /// instance of a `XbergTesseractWorker` containing a Tesseract object.
+    fn ocr_pages_parallel(&self, pages: &[PageData]) -> Result<Vec<OcrPage>, OcrError> {
         // Create pool of Rayon workers.
         let pool = ThreadPoolBuilder::new()
             .num_threads(Self::max_workers())
             .build()
-            .context("Failed to create pool of Rayon workers for parallel OCR.")?;
+            .map_err(|err| OcrError::ThreadPool(err.into()))?;
 
         // Set previous initiated pool to run closure.
         pool.install(|| {
             pages
                 .par_iter() // Convert iter into Rayon parallel iterator.
                 .map_init(
-                    // The `init` argument for `map_init`.
-                    // Each worker wil init its own instance of `KreuzbergTesseractWorker`
-                    // responsible for performing the OCR on the allocated pages.
-                    KreuzbergTesseractOcrWorker::new,
-                    // `ocr_worker` is the result of our previous `map_init` call.
-                    // `page` is one item from the `pages.par_item` allocted to current worker.
-                    |ocr_worker, page| -> Result<OcrPage> {
-                        // Get OCR-worker as reference so we do not move it out
-                        // of the local Rayon-worker.
-                        let worker = ocr_worker.as_ref().map_err(|err| {
-                            anyhow!("Failed to init KreuzbergTesseractWorker: {err}")
-                        })?;
-
-                        worker
-                            .ocr_page(&page.pixels, page.width, page.height)
-                            .with_context(|| "Failed to run KreuzbergTesseractOCR.".to_string())
+                    // Each Rayon worker gets its own `XbergTesseractOcrWorker`,
+                    // created lazily on its first page. If creating it fails, we
+                    // return that error and let `collect()` stop the iteration.
+                    || None,
+                    |ocr_worker: &mut Option<XbergTesseractOcrWorker>, page| {
+                        let worker = match ocr_worker {
+                            Some(worker) => worker,
+                            None => ocr_worker.insert(XbergTesseractOcrWorker::new()?),
+                        };
+                        worker.ocr_page(page.pixels(), page.width(), page.height())
                     },
                 )
-                .collect::<Result<Vec<OcrPage>>>()
+                .collect::<Result<Vec<OcrPage>, OcrError>>()
         })
     }
 }
 
-impl OcrBackend for KreuzbergTesseractOcr {
-    fn ocr_pages(&self, pages: &[PageData]) -> Result<Vec<OcrPage>> {
+impl OcrBackend for XbergTesseractOcr {
+    fn ocr_pages(&self, pages: &[PageData]) -> Result<Vec<OcrPage>, OcrError> {
         self.ocr_pages_parallel(pages)
+    }
+}
+
+/// Wrap a Tesseract error, saying what we were trying to do.
+fn tesseract_error(action: &'static str) -> impl FnOnce(TesseractError) -> OcrError {
+    move |err| OcrError::Tesseract {
+        action,
+        source: Box::new(err),
     }
 }
 
 /// Extract OCR words and their properties.
 ///
-/// Uses `kreuzberg-tesseract`'s high-level iterator helper instead of local
+/// Uses `xberg-tesseract`'s high-level iterator helper instead of local
 /// low-level Tesseract bindings.
-fn extract_ocr_words(iterator: &ResultIterator) -> Result<Vec<OcrWord>> {
+fn extract_ocr_words(iterator: &ResultIterator) -> Result<Vec<OcrWord>, OcrError> {
     let words = iterator
         .extract_all_words()
-        .context("Failed to extract OCR words from Tesseract result iterator")?;
+        .map_err(tesseract_error("extract words from the result iterator"))?
+        // Words that Tesseract returned unusable data for are left out. The
+        // text layer is a best effort, so it's better than failing the page.
+        .words;
 
     Ok(words
         .into_iter()
@@ -256,11 +248,11 @@ fn extract_ocr_words(iterator: &ResultIterator) -> Result<Vec<OcrWord>> {
 
 #[cfg(test)]
 mod tests {
-    use super::KreuzbergTesseractOcrWorker;
+    use super::XbergTesseractOcrWorker;
 
     #[test]
     fn initializes_with_tesseract_data() {
-        KreuzbergTesseractOcrWorker::new()
+        XbergTesseractOcrWorker::new()
             .expect("Tesseract data should be available on every supported platform");
     }
 }
