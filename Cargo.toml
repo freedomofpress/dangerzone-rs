@@ -2,6 +2,14 @@
 name = "dangerzone-rs"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-only"
+authors = ["Freedom of the Press Foundation <info@freedom.press>"]
+description = "Convert potentially dangerous documents into safe PDFs"
+homepage = "https://dangerzone.rocks"
+repository = "https://github.com/freedomofpress/dangerzone-rs"
+readme = "README.md"
+keywords = ["dangerzone", "sanitization", "pdf", "security", "document"]
+categories = ["command-line-utilities", "multimedia::images", "text-processing"]
 
 [[bin]]
 name = "dangerzone-rs"
