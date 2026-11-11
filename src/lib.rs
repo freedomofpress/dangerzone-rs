@@ -509,6 +509,10 @@ pub fn apply_ocr_fn(input_path: String, output_path: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use testresult::TestResult;
+
     use super::*;
 
     #[test]
@@ -718,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn test_forward_sanitized_text() {
+    fn test_forward_sanitized_text() -> TestResult {
         let input = concat!(
             "plain ✓ café 😀\n",
             "\x1b[31mANSI escaped\n",
@@ -745,17 +749,18 @@ mod tests {
         );
 
         let reader = BufReader::new(std::io::Cursor::new(input.as_bytes()));
-        let out = tempfile::NamedTempFile::new().unwrap();
+        let out = tempfile::NamedTempFile::new()?;
         let out_path = out.path().to_path_buf();
-        let out_file = out.reopen().unwrap();
+        let out_file = out.reopen()?;
 
-        forward_sanitized_text(reader, out_file).unwrap();
+        forward_sanitized_text(reader, out_file)?;
 
-        let output_bytes = std::fs::read(out_path).unwrap();
-        let output = String::from_utf8(output_bytes).unwrap();
+        let output_bytes = fs::read(out_path)?;
+        let output = String::from_utf8(output_bytes)?;
         assert_eq!(
             output, expected_output,
             "forward_sanitized_text failed for input: {input:?}",
         );
+        Ok(())
     }
 }
