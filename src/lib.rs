@@ -15,7 +15,7 @@ mod util;
 
 pub const IMAGE_NAME: &str = "ghcr.io/freedomofpress/dangerzone/v1";
 pub const INT_BYTES: usize = 2;
-pub const DPI: f32 = 150.0;
+pub const DPI: usize = 150;
 const MAX_SANITIZED_CHUNK_BYTES: u64 = 64 * 1024;
 
 fn get_security_args() -> Vec<String> {
@@ -374,8 +374,8 @@ fn write_pdf<W: Write>(
         eprintln!("Adding page {} to PDF...", page_idx + 1);
 
         // Convert pixels to points (1 point = 1/72 inch)
-        let width_pts = (page.width as f32) / DPI * 72.0;
-        let height_pts = (page.height as f32) / DPI * 72.0;
+        let width_pts = (page.width as f32) / (DPI as f32) * 72.0;
+        let height_pts = (page.height as f32) / (DPI as f32) * 72.0;
 
         // Page object
         let page_obj_num = first_object_on_first_page_index + page_idx * 2;
@@ -441,8 +441,8 @@ fn write_pdf<W: Write>(
 
     // Content stream objects for each page
     for (page_idx, page) in pages.iter().enumerate() {
-        let width_pts = (page.width as f32) / DPI * 72.0;
-        let height_pts = (page.height as f32) / DPI * 72.0;
+        let width_pts = (page.width as f32) / (DPI as f32) * 72.0;
+        let height_pts = (page.height as f32) / (DPI as f32) * 72.0;
         let mut content =
             format!("q\n{width_pts:.2} 0 0 {height_pts:.2} 0 0 cm\n/Im{page_idx} Do\nQ\n");
 
