@@ -1,6 +1,5 @@
 //! PDF rendering helpers for invisible OCR text layers.
 
-use anyhow::Result;
 use std::fmt::Write;
 
 use super::OcrPage;
@@ -37,7 +36,7 @@ fn text_to_utf16be_hex(text: &str) -> String {
 pub(crate) fn embed_ocr_font(
     pdf_data: &mut Vec<u8>,          // Raw PDF data
     object_offsets: &mut Vec<usize>, // Byte positions of each new object. Used to write the PDF xref table.
-) -> Result<()> {
+) {
     // Object 3: Type0 font. Wrapper for character text to route
     // character codes to correct descendant font.
     object_offsets.push(pdf_data.len());
@@ -128,8 +127,6 @@ pub(crate) fn embed_ocr_font(
     pdf_data.extend_from_slice(GLYPHLESS_PDF_TTF);
     pdf_data.extend_from_slice(b"\nendstream\n");
     pdf_data.extend_from_slice(b"endobj\n");
-
-    Ok(())
 }
 
 /// Append invisible OCR text operations to a page content stream.
@@ -137,7 +134,7 @@ pub(crate) fn append_ocr_text_layer(content: &mut String, ocr_page: &OcrPage, he
     // OCR gives word boxes in page pixels, measured from the top-left.
     // PDF text positions use points, measured from the bottom-left, so
     // each word position must be scaled and flipped vertically.
-    let scale = 72.0 / DPI;
+    let scale = 72.0 / DPI as f32;
 
     // This is a hardcoded const used for calibration to determine how wide the PDF would
     // make a hidden word. If we change font metrics of our OCR fonts like `/ DW` this
