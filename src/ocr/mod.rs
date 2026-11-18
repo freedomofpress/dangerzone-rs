@@ -5,8 +5,8 @@ use anyhow::Result;
 use crate::PageData;
 
 pub(crate) mod pdf_renderer;
-pub(crate) mod xberg_tesseract;
-pub(crate) use self::xberg_tesseract::XbergTesseractOcr;
+pub(crate) mod tesseract;
+pub(crate) use self::tesseract::TesseractOcr;
 
 /// Object holding coordinates and size data of OCR object
 #[derive(Clone, Copy, Debug)]

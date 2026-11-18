@@ -15,17 +15,17 @@ use super::{OcrBackend, OcrPage, OcrVBox, OcrWord};
 const OEM_DEFAULT: i32 = 3;
 
 /// OCR backend powered by `xberg-tesseract`.
-pub(crate) struct XbergTesseractOcr;
+pub(crate) struct TesseractOcr;
 
-/// Since the `XbergTesseractOcr` backend will be always called
+/// Since the `TesseractOcr` backend will be always called
 /// in parallel, we need a seperate type representing the worker.
 /// This worker will be initialized in the Rayon workers, and will
 /// contain the logic to do OCR work for a page.
-struct XbergTesseractOcrWorker {
+struct TesseractOcrWorker {
     api: TesseractAPI,
 }
 
-impl XbergTesseractOcrWorker {
+impl TesseractOcrWorker {
     /// Create new instance of OCR worker. This worker will
     /// contain the logic to init the Tesseract API instance + doing
     /// OCR for a page. Since each Rayon worker will have one
@@ -145,8 +145,8 @@ impl XbergTesseractOcrWorker {
     }
 }
 
-impl XbergTesseractOcr {
-    /// Create instance of `XbergTesseractOcr`.
+impl TesseractOcr {
+    /// Create instance of `TesseractOcr`.
     /// This type only contains methods to call logic for
     /// parallel OCR.
     pub(crate) fn new() -> Self {
@@ -164,7 +164,7 @@ impl XbergTesseractOcr {
 
     /// Handle OCR for all pages in parallel.
     /// This method creates a pool of Rayon workers, each Rayon-worker will initialize it's own
-    /// instance of a `XbergTesseractWorker` containing a Tesseract object.
+    /// instance of a `TesseractWorker` containing a Tesseract object.
     fn ocr_pages_parallel(&self, pages: &[PageData]) -> Result<Vec<OcrPage>> {
         // Create pool of Rayon workers.
         let pool = ThreadPoolBuilder::new()
@@ -178,9 +178,9 @@ impl XbergTesseractOcr {
                 .par_iter() // Convert iter into Rayon parallel iterator.
                 .map_init(
                     // The `init` argument for `map_init`.
-                    // Each worker wil init its own instance of `XbergTesseractWorker`
+                    // Each worker wil init its own instance of `TesseractWorker`
                     // responsible for performing the OCR on the allocated pages.
-                    XbergTesseractOcrWorker::new,
+                    TesseractOcrWorker::new,
                     // `ocr_worker` is the result of our previous `map_init` call.
                     // `page` is one item from the `pages.par_item` allocted to current worker.
                     |ocr_worker, page| -> Result<OcrPage> {
@@ -188,11 +188,11 @@ impl XbergTesseractOcr {
                         // of the local Rayon-worker.
                         let worker = ocr_worker
                             .as_ref()
-                            .map_err(|err| anyhow!("Failed to init XbergTesseractWorker: {err}"))?;
+                            .map_err(|err| anyhow!("Failed to init TesseractWorker: {err}"))?;
 
                         worker
                             .ocr_page(&page.pixels, page.width, page.height)
-                            .with_context(|| "Failed to run XbergTesseractOCR.".to_string())
+                            .with_context(|| "Failed to run TesseractOCR.".to_string())
                     },
                 )
                 .collect::<Result<Vec<OcrPage>>>()
@@ -200,7 +200,7 @@ impl XbergTesseractOcr {
     }
 }
 
-impl OcrBackend for XbergTesseractOcr {
+impl OcrBackend for TesseractOcr {
     fn ocr_pages(&self, pages: &[PageData]) -> Result<Vec<OcrPage>> {
         self.ocr_pages_parallel(pages)
     }
@@ -247,11 +247,11 @@ fn extract_ocr_words(iterator: &ResultIterator) -> Result<Vec<OcrWord>> {
 
 #[cfg(test)]
 mod tests {
-    use super::XbergTesseractOcrWorker;
+    use super::TesseractOcrWorker;
 
     #[test]
     fn initializes_with_tesseract_data() {
-        XbergTesseractOcrWorker::new()
+        TesseractOcrWorker::new()
             .expect("Tesseract data should be available on every supported platform");
     }
 }
