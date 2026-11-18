@@ -2,7 +2,7 @@
 name = "dangerzone-rs"
 version = "0.1.0"
 edition = "2021"
-license = "AGPL-3.0-only"
+license = "AGPL-3.0-or-later"
 authors = ["Freedom of the Press Foundation <info@freedom.press>"]
 description = "Convert potentially dangerous documents into safe PDFs"
 homepage = "https://dangerzone.rocks"
